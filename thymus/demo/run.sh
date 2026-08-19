@@ -11,6 +11,7 @@ cleanup() {
 trap cleanup EXIT
 
 set -a; . "$ROOT/.env.local"; set +a
+export THYMUS_STORE="$ROOT/thymus/trajectories"
 git -C "$DSH" apply "$ROOT/probes/scope-fix.patch"
 mkdir -p "$DSH/thymus-demo/src" "$DSH/thymus-demo/demo"
 cp "$ROOT"/thymus/src/*.ts "$DSH/thymus-demo/src/"
