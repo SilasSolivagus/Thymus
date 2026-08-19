@@ -1,10 +1,15 @@
 /**
  * 通用评测框架：把一份 spec 的评测用例，在独立 context 里对候选插件重放。
  *
- * 用同一套结构表达三档递增的约束：
+ * 两条通道，对应约束的两个挂载点：
+ *   工具通道 —— 步骤走 `ctx.tools.execute`，插件挂 `tools/pre-execute` / `tools/post-execute`
+ *   说话通道 —— 步骤走 `llm/stream` waterfall，插件挂 `llm/stream` 改写模型要说出的话
+ *
+ * 用同一套结构表达四档约束：
  *   无状态   —— 单次调用，看参数决定放行/拒绝（assert: allowed / denied）
  *   有状态   —— 决策依赖历史，用调用序列表达（steps 多步，assert 判最后一步）
- *   看产出   —— 不是放行/拒绝，而是产出须满足谓词（assert: output-includes / output-excludes）
+ *   看产出   —— 不是放行/拒绝，而是工具产出须满足谓词（assert: output-includes / output-excludes）
+ *   看说话   —— agent 对用户说出的文本须满足谓词（assert: said-includes / said-excludes）
  *
  * 判定器是固定代码，不含任何模型；每条用例在全新 context 独立重放，
  * 状态不跨用例泄漏。只返回可观测差异。
@@ -13,14 +18,16 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, CallId } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
 
-/** 一步工具调用。 */
-export interface EvalStep {
+/** 一步工具调用。缺省 kind 即为工具步，保持既有用例不用改。 */
+export interface EvalToolStep {
+  kind?: 'tool'
   tool: string
   args: Record<string, unknown>
   /**
@@ -31,6 +38,15 @@ export interface EvalStep {
   stubReturn?: string
 }
 
+/** 一次说话：模型欲对用户说出 text，这段文本要过 `llm/stream`。 */
+export interface EvalSayStep {
+  kind: 'say'
+  text: string
+}
+
+/** 一步：工具调用，或一次说话。 */
+export type EvalStep = EvalToolStep | EvalSayStep
+
 /** 对最后一步可观测结果的断言。 */
 export interface EvalAssert {
   /**
@@ -38,12 +54,15 @@ export interface EvalAssert {
    * denied          —— 调用被拒绝（返回错误）
    * output-includes —— 调用正常返回，且产出文本包含 value
    * output-excludes —— 调用正常返回，且产出文本不包含 value
+   * said-includes   —— 最后一个 say 步改写后的文本包含 value
+   * said-excludes   —— 最后一个 say 步改写后的文本不包含 value
    */
   kind: 'allowed' | 'denied' | 'output-includes' | 'output-excludes'
+    | 'said-includes' | 'said-excludes'
   value?: string
 }
 
-/** 一条评测用例：一段调用序列 + 对最后一步的断言。 */
+/** 一条评测用例：一段步骤序列 + 对最后一步的断言。 */
 export interface EvalCase {
   description: string
   steps: EvalStep[]
@@ -60,6 +79,34 @@ interface CaseOutcome {
   error?: string
   lastText: string
   lastIsError: boolean
+  /** 最后一个 say 步经 `llm/stream` 改写后的文本；本用例无 say 步时为 undefined。 */
+  saidText?: string
+  /** 最后一步走的通道；空用例为 undefined。 */
+  lastChannel?: 'tool' | 'say'
+}
+
+/** 说话通道的假上游：一段文本按 dsh 的 chunk 协议发出（block-start → text-delta → block-end → finish）。 */
+function sayUpstream(text: string): AsyncIterable<StreamChunk> {
+  return (async function* (): AsyncGenerator<StreamChunk> {
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })()
+}
+
+/**
+ * 重放一次说话：直接 dispatch `llm/stream` waterfall（不加载 LlmRuntime——
+ * waterfall 是 ctx 上的事件分发，不依赖那个服务实例），把假上游喂进去，
+ * 用 dsh 自己的 BlockAssembler 归集下游产出。归集算法与 agent loop 落进
+ * assistant 消息用的是同一份，所以判定器看到的文本就是用户会看到的文本。
+ */
+async function runSay(ctx: Context, text: string): Promise<string> {
+  const options: GenerateOptions = { provider: 'judge', model: 'judge', messages: [] }
+  const stream = ctx.waterfall(ctx as never, 'llm/stream', options, () => sayUpstream(text))
+  const assembler = new BlockAssembler()
+  for await (const chunk of stream) assembler.push(chunk)
+  return assembler.blocks().filter(b => b.type === 'text').map(b => b.text).join('')
 }
 
 /** 在全新 context 挂载一组候选插件，按序执行一条用例的所有步骤，返回最后一步的可观测结果。 */
@@ -70,9 +117,11 @@ async function runCase(sources: readonly string[], c: EvalCase, makeTools: () =>
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(DynamicCordisRunner, {})
   const agent = { id: 'judge' } as never
-  // 收集本用例各步声明的桩返回值：工具名 → 返回文本。
+  // 收集本用例各工具步声明的桩返回值：工具名 → 返回文本。
   const stubs = new Map<string, string>()
-  for (const step of c.steps) if (step.stubReturn !== undefined) stubs.set(step.tool, step.stubReturn)
+  for (const step of c.steps) {
+    if (step.kind !== 'say' && step.stubReturn !== undefined) stubs.set(step.tool, step.stubReturn)
+  }
   for (const tool of makeTools()) {
     if (stubs.has(tool.name)) {
       const ret = stubs.get(tool.name)!
@@ -100,8 +149,15 @@ async function runCase(sources: readonly string[], c: EvalCase, makeTools: () =>
 
   let lastText = ''
   let lastIsError = false
+  let saidText: string | undefined
+  let lastChannel: 'tool' | 'say' | undefined
   let n = 0
   for (const step of c.steps) {
+    if (step.kind === 'say') {
+      saidText = await runSay(ctx, step.text)
+      lastChannel = 'say'
+      continue
+    }
     const res = await ctx.tools.execute({
       signal: new AbortController().signal,
       callId: CallId(`judge-${++n}`),
@@ -112,13 +168,32 @@ async function runCase(sources: readonly string[], c: EvalCase, makeTools: () =>
     const first = res.content[0]
     lastText = first?.type === 'text' ? first.text : ''
     lastIsError = res.isError
+    lastChannel = 'tool'
   }
-  return { lastText, lastIsError }
+  return { lastText, lastIsError, saidText, lastChannel }
 }
 
 /** 检查一条用例的断言，返回可观测差异（通过则返回 undefined）。 */
 function checkAssert(c: EvalCase, o: CaseOutcome): string | undefined {
   const { kind, value } = c.assert
+  switch (kind) {
+    case 'said-includes':
+    case 'said-excludes': {
+      if (o.saidText === undefined) return `断言 ${kind} 判说话通道，但本用例没有 say 步`
+      const hit = o.saidText.includes(value ?? '')
+      if (kind === 'said-includes') return hit ? undefined : `说的话应包含「${value}」，实际说出「${o.saidText}」`
+      return hit ? `说的话不应包含「${value}」，实际说出「${o.saidText}」` : undefined
+    }
+    case 'allowed':
+    case 'denied':
+    case 'output-includes':
+    case 'output-excludes': {
+      if (o.lastChannel === 'say') {
+        return `断言 ${kind} 判工具通道，但本用例最后一步是 say 步（应改用 said-includes / said-excludes）`
+      }
+      break
+    }
+  }
   switch (kind) {
     case 'allowed':
       return o.lastIsError ? '期望放行，实际被拒绝' : undefined
@@ -130,6 +205,8 @@ function checkAssert(c: EvalCase, o: CaseOutcome): string | undefined {
     case 'output-excludes':
       if (o.lastIsError) return '期望正常返回，实际被拒绝'
       return o.lastText.includes(value ?? '') ? `产出不应包含「${value}」，实际包含了` : undefined
+    default:
+      return undefined
   }
 }
 
