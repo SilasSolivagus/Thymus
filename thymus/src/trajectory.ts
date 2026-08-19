@@ -7,6 +7,7 @@
  * 字段对应 DESIGN.md 5.3 的信号表：
  *   steps / toolCalls  → 信号 3（步数节省），消融时两边相减
  *   deadCalls          → 信号 2（必经性）：结果没被后续步骤消费的调用 = 空转
+ *   errorResults       → Policy 层的拦截代理量（5.4：Policy 的价值是拦截数，不是省了几步）
  *   turns              → 归一化的分母，按 spec 比较时用
  *
  * @module thymus/trajectory
@@ -23,6 +24,14 @@ export interface TrajectoryEvidence {
   toolCalls: number
   /** 结果直到本轮结束都没被后续步骤消费的调用数。空转。 */
   deadCalls: number
+  /**
+   * 返回错误结果的调用数。
+   *
+   * Policy 器官拦下一次调用，产出的就是 `isError` 结果，所以这一项是拦截数的
+   * 可折叠代理量。注意它同时包含工具自身失败——从日志层面这两者不可分，
+   * 要精确区分得由器官自己上报。
+   */
+  errorResults: number
 }
 
 interface State extends TrajectoryEvidence {
@@ -32,7 +41,7 @@ interface State extends TrajectoryEvidence {
   stepsThisTurn: number
 }
 
-const INITIAL: State = { turns: 0, steps: 0, toolCalls: 0, deadCalls: 0, pending: 0, stepsThisTurn: 0 }
+const INITIAL: State = { turns: 0, steps: 0, toolCalls: 0, deadCalls: 0, errorResults: 0, pending: 0, stepsThisTurn: 0 }
 
 /** @returns 空日志的初始状态。 */
 export function init(): State {
@@ -65,8 +74,14 @@ export function apply(state: State, event: SessionEvent): State {
     case 'tool/call':
       return { ...state, toolCalls: state.toolCalls + 1 }
 
-    case 'tool/result':
-      return { ...state, pending: state.pending + 1 }
+    case 'tool/result': {
+      const errored = event.data.message.content[0]?.isError === true
+      return {
+        ...state,
+        pending: state.pending + 1,
+        errorResults: errored ? state.errorResults + 1 : state.errorResults,
+      }
+    }
 
     case 'turn/end':
       // 收尾：本轮还悬着的结果没人消费，记为空转。
@@ -90,7 +105,10 @@ export function apply(state: State, event: SessionEvent): State {
  * @returns 这条轨迹的证据。
  */
 export function view(state: State): TrajectoryEvidence {
-  return { turns: state.turns, steps: state.steps, toolCalls: state.toolCalls, deadCalls: state.deadCalls }
+  return {
+    turns: state.turns, steps: state.steps, toolCalls: state.toolCalls,
+    deadCalls: state.deadCalls, errorResults: state.errorResults,
+  }
 }
 
 /**
@@ -106,5 +124,6 @@ export function contribution(withOrgan: TrajectoryEvidence, without: TrajectoryE
     steps: withOrgan.steps - without.steps,
     toolCalls: withOrgan.toolCalls - without.toolCalls,
     deadCalls: withOrgan.deadCalls - without.deadCalls,
+    errorResults: withOrgan.errorResults - without.errorResults,
   }
 }

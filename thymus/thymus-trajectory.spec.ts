@@ -85,7 +85,7 @@ describe('Thymus 轨迹证据：对真实事件序列', () => {
     await poke(agent, 'hello')
 
     const evidence = fold([...agent.session.events])
-    expect(evidence).toEqual({ turns: 1, steps: 1, toolCalls: 0, deadCalls: 0 })
+    expect(evidence).toEqual({ turns: 1, steps: 1, toolCalls: 0, deadCalls: 0, errorResults: 0 })
   })
 
   it('两轮对话累加', async () => {
@@ -103,20 +103,25 @@ describe('Thymus 轨迹证据：对真实事件序列', () => {
 /** 空转那条路真实事件里不好造，用构造事件把算术钉死。 */
 describe('Thymus 轨迹证据：空转与消融的算术', () => {
   const ev = (type: string): SessionEvent => ({ type } as unknown as SessionEvent)
+  /** tool/result 要带真实结构，折叠要读 message.content[0].isError。 */
+  const result = (isError = false): SessionEvent => ({
+    type: 'tool/result',
+    data: { message: { content: [{ type: 'tool-result', isError }] } },
+  } as unknown as SessionEvent)
 
   it('结果到本轮结束都没被后续步骤消费，记为空转', () => {
     const evidence = fold([
       ev('turn/start'), ev('step/start'), ev('step/end'),
-      ev('tool/call'), ev('tool/result'),
+      ev('tool/call'), result(),
       ev('turn/end'),                      // 结果之后再没有 step/start
     ])
-    expect(evidence).toEqual({ turns: 1, steps: 1, toolCalls: 1, deadCalls: 1 })
+    expect(evidence).toEqual({ turns: 1, steps: 1, toolCalls: 1, deadCalls: 1, errorResults: 0 })
   })
 
   it('结果之后又起了一步，就不算空转', () => {
     const evidence = fold([
       ev('turn/start'), ev('step/start'), ev('step/end'),
-      ev('tool/call'), ev('tool/result'),
+      ev('tool/call'), result(),
       ev('step/start'), ev('step/end'),    // 这一步读了它
       ev('turn/end'),
     ])
@@ -134,9 +139,20 @@ describe('Thymus 轨迹证据：空转与消融的算术', () => {
     expect(apply(state, ev('user/message'))).toBe(state)
   })
 
+  it('被拒的调用计入 errorResults —— Policy 层的拦截代理量', () => {
+    const evidence = fold([
+      ev('turn/start'), ev('step/start'), ev('step/end'),
+      ev('tool/call'), result(true),
+      ev('step/start'), ev('step/end'),
+      ev('turn/end'),
+    ])
+    expect(evidence.errorResults).toBe(1)
+    expect(evidence.toolCalls).toBe(1)
+  })
+
   it('消融相减：器官省下了步数与空转', () => {
-    const withOrgan: TrajectoryEvidence = { turns: 3, steps: 7, toolCalls: 4, deadCalls: 0 }
-    const without: TrajectoryEvidence = { turns: 3, steps: 11, toolCalls: 9, deadCalls: 3 }
-    expect(contribution(withOrgan, without)).toEqual({ turns: 0, steps: -4, toolCalls: -5, deadCalls: -3 })
+    const withOrgan: TrajectoryEvidence = { turns: 3, steps: 7, toolCalls: 4, deadCalls: 0, errorResults: 5 }
+    const without: TrajectoryEvidence = { turns: 3, steps: 11, toolCalls: 9, deadCalls: 3, errorResults: 0 }
+    expect(contribution(withOrgan, without)).toEqual({ turns: 0, steps: -4, toolCalls: -5, deadCalls: -3, errorResults: 5 })
   })
 })
