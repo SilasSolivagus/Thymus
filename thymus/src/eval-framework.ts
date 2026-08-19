@@ -62,8 +62,8 @@ interface CaseOutcome {
   lastIsError: boolean
 }
 
-/** 在全新 context 挂载候选插件，按序执行一条用例的所有步骤，返回最后一步的可观测结果。 */
-async function runCase(source: string, c: EvalCase, makeTools: () => ToolDefinition[]): Promise<CaseOutcome> {
+/** 在全新 context 挂载一组候选插件，按序执行一条用例的所有步骤，返回最后一步的可观测结果。 */
+async function runCase(sources: readonly string[], c: EvalCase, makeTools: () => ToolDefinition[]): Promise<CaseOutcome> {
   const ctx = new Context()
   await ctx.plugin(Timer)
   await ctx.plugin(SystemPrompt)
@@ -82,17 +82,20 @@ async function runCase(source: string, c: EvalCase, makeTools: () => ToolDefinit
     }
   }
 
-  try {
-    const { pluginId, packageId } = ctx.dynamicCordisRunner.define({
-      sessionId: 'judge' as never,
-      plugin: { kind: 'new', idPrefix: 'cand' },
-      name: 'candidate', purpose: 'eval candidate',
-      code: { host: source },
-    })
-    const receipt = await ctx.dynamicCordisRunner.run(agent, pluginId, packageId, 'run')
-    if (!receipt.ok) return { error: `插件无法挂载：${receipt.message}`, lastText: '', lastIsError: true }
-  } catch (e) {
-    return { error: `插件无法挂载：${e instanceof Error ? e.message.split('\n')[0] : String(e)}`, lastText: '', lastIsError: true }
+  // 组内每个插件独立 define + run，全部挂进同一运行时——真实部署的形态。
+  for (let i = 0; i < sources.length; i++) {
+    try {
+      const { pluginId, packageId } = ctx.dynamicCordisRunner.define({
+        sessionId: 'judge' as never,
+        plugin: { kind: 'new', idPrefix: 'cand' },
+        name: `candidate-${i}`, purpose: 'eval candidate',
+        code: { host: sources[i]! },
+      })
+      const receipt = await ctx.dynamicCordisRunner.run(agent, pluginId, packageId, 'run')
+      if (!receipt.ok) return { error: `插件[${i}]无法挂载：${receipt.message}`, lastText: '', lastIsError: true }
+    } catch (e) {
+      return { error: `插件[${i}]无法挂载：${e instanceof Error ? e.message.split('\n')[0] : String(e)}`, lastText: '', lastIsError: true }
+    }
   }
 
   let lastText = ''
@@ -132,19 +135,20 @@ function checkAssert(c: EvalCase, o: CaseOutcome): string | undefined {
 
 /**
  * 对候选插件重放整组评测用例。
- * @param source - 开发方提交的宿主半插件源码。
+ * @param source - 开发方提交的宿主半插件源码，单个或一组（一组则全部挂进同一运行时）。
  * @param cases - 冻结的评测用例。
  * @param makeTools - 该 spec 的环境工具集（每条用例重新构造，避免状态跨例泄漏）。
  * @returns 判定结果，diffs 仅含可观测差异。
  */
 export async function judgeCases(
-  source: string,
+  source: string | readonly string[],
   cases: readonly EvalCase[],
   makeTools: () => ToolDefinition[],
 ): Promise<JudgeResult> {
+  const sources = typeof source === 'string' ? [source] : source
   const diffs: string[] = []
   for (const c of cases) {
-    const outcome = await runCase(source, c, makeTools)
+    const outcome = await runCase(sources, c, makeTools)
     if (outcome.error !== undefined) { diffs.push(`用例「${c.description}」：${outcome.error}`); continue }
     const diff = checkAssert(c, outcome)
     if (diff !== undefined) diffs.push(`用例「${c.description}」：${diff}`)
