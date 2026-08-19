@@ -1,0 +1,29 @@
+digraph scope_ladder {
+  rankdir=LR; bgcolor="#F7F8FA"; pad=0.45; nodesep=0.45; ranksep=1.5; splines=spline;
+  node [shape=box, style="rounded,filled", fontname="PingFang SC", fontsize=14,
+        fontcolor="#1F2933", penwidth=1.6, margin="0.26,0.17"];
+  edge [color="#5F6B7A", penwidth=1.8, fontname="PingFang SC", fontsize=11,
+        fontcolor="#6B7280", arrowsize=0.8];
+
+  L0  [label="已定义 · 未挂载", fillcolor="#FFFFFF", color="#D5DAE0"];
+  ARC [label="档案\n源码 · 轨迹摘要 · 退役原因", fillcolor="#FFFFFF", color="#D5DAE0", fontsize=12];
+  L1  [label="单会话\n只在造它的那次对话里生效", fillcolor="#E8F0FE", color="#4285F4"];
+  L2  [label="preset 层\n同一类任务的会话共用", fillcolor="#E6F4EA", color="#34A853"];
+  L3  [label="全局层\n所有会话 · 重启后仍在", fillcolor="#FDECEA", color="#EA4335", penwidth=2.6];
+  PUR [label="清除\n危险行为 · 任意层级立即掉出", fillcolor="#FFFFFF", color="#EA4335", style="rounded,filled,dashed", fontsize=12];
+
+  { rank=same; L0; ARC; }
+
+  L0 -> L1 [label="通用筛\n语法 / schema / 能否启动", color="#34A853", fontcolor="#34A853"];
+  L1 -> L2 [label="场景筛\n历史轨迹重放不退化", color="#34A853", fontcolor="#34A853"];
+  L2 -> L3 [label="转正审查\n消融验证有贡献 · 落盘", color="#EA4335", fontcolor="#EA4335", penwidth=2.4];
+
+  L1 -> L2 [dir=back, label="降一级\n观察期", color="#F9AB00", fontcolor="#F9AB00"];
+  L2 -> L3 [dir=back, label="降一级\n观察期", color="#F9AB00", fontcolor="#F9AB00"];
+  ARC -> L1 [dir=back, label="退役", color="#F9AB00", fontcolor="#F9AB00"];
+
+  { rank=same; L2; PUR; }
+  L1 -> PUR [style=dashed, color="#EA4335", arrowsize=0.6, weight=0];
+  L2 -> PUR [style=dashed, color="#EA4335", arrowsize=0.6, weight=0];
+  L3 -> PUR [style=dashed, color="#EA4335", arrowsize=0.6, weight=0];
+}
