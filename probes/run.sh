@@ -16,4 +16,5 @@ cp "$ROOT"/probes/thymus-probe*.spec.ts "$DEST/"
 cd "$DSH"
 CI=true corepack pnpm vitest run \
   packages/extensions/cordis-host-runner/tests/thymus-probe.spec.ts \
-  packages/extensions/cordis-host-runner/tests/thymus-probe-loop.spec.ts
+  packages/extensions/cordis-host-runner/tests/thymus-probe-loop.spec.ts \
+  packages/extensions/cordis-host-runner/tests/thymus-probe-persist.spec.ts
