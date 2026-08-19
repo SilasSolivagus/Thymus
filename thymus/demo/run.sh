@@ -14,6 +14,6 @@ set -a; . "$ROOT/.env.local"; set +a
 git -C "$DSH" apply "$ROOT/probes/scope-fix.patch"
 mkdir -p "$DSH/thymus-demo/src" "$DSH/thymus-demo/demo"
 cp "$ROOT"/thymus/src/*.ts "$DSH/thymus-demo/src/"
-cp "$ROOT"/thymus/demo/run.ts "$DSH/thymus-demo/demo/"
+cp "$ROOT"/thymus/demo/*.ts "$DSH/thymus-demo/demo/"
 cd "$DSH"
-CI=true corepack pnpm exec tsx thymus-demo/demo/run.ts
+CI=true corepack pnpm exec tsx "thymus-demo/demo/${DEMO:-run}.ts"
