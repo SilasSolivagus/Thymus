@@ -9,15 +9,16 @@ DSH="$ROOT/vendor/deepseek-harness"
 DEST="$DSH/packages/extensions/cordis-host-runner/tests"
 
 cleanup() {
-  rm -f "$DEST/thymus-probe-ladder.spec.ts" "$DEST/thymus-probe-closed-loop.spec.ts"
+  rm -f "$DEST/thymus-probe-ladder.spec.ts" "$DEST/thymus-probe-closed-loop.spec.ts" "$DEST/thymus-probe-escape.spec.ts"
   git -C "$DSH" checkout -- packages/extensions/cordis-host-runner/src/index.ts 2>/dev/null || true
 }
 trap cleanup EXIT
 
 git -C "$DSH" apply "$ROOT/probes/scope-fix.patch"
-cp "$ROOT/probes/thymus-probe-ladder.spec.ts" "$ROOT/probes/thymus-probe-closed-loop.spec.ts" "$DEST/"
+cp "$ROOT/probes/thymus-probe-ladder.spec.ts" "$ROOT/probes/thymus-probe-closed-loop.spec.ts" "$ROOT/probes/thymus-probe-escape.spec.ts" "$DEST/"
 cd "$DSH"
 CI=true corepack pnpm vitest run \
   packages/extensions/cordis-host-runner/tests/thymus-probe-ladder.spec.ts \
   packages/extensions/cordis-host-runner/tests/thymus-probe-closed-loop.spec.ts \
+  packages/extensions/cordis-host-runner/tests/thymus-probe-escape.spec.ts \
   packages/extensions/cordis-host-runner/tests/
