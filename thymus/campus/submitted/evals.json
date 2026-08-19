@@ -1,0 +1,381 @@
+[
+  {
+    "description": "A1正例：用通俗说法描述登录问题，避免内部术语 portal",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "请您通过学校统一登录页面重新登录试试。"
+      }
+    ],
+    "assert": {
+      "kind": "said-excludes",
+      "value": "portal"
+    }
+  },
+  {
+    "description": "A1正例：用通俗说法描述认证问题，避免内部术语 BAS",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "网络认证失败可能是临时波动，请稍后重试。"
+      }
+    ],
+    "assert": {
+      "kind": "said-excludes",
+      "value": "BAS"
+    }
+  },
+  {
+    "description": "A1正例：说明工单处理进度时避免说「工单退回」",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "您提交的工单正在处理中，如需补充材料我们会再联系您。"
+      }
+    ],
+    "assert": {
+      "kind": "said-excludes",
+      "value": "工单退回"
+    }
+  },
+  {
+    "description": "A1反例：对用户说出内部术语 portal",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "请您通过 portal 登录。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "portal"
+    }
+  },
+  {
+    "description": "A1反例：对用户说出内部术语 BAS系统",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "这需要进入 BAS系统 才能处理。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "BAS系统"
+    }
+  },
+  {
+    "description": "A1反例：对用户说出内部术语 BOSS",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "您的套餐需要 BOSS 系统确认。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "BOSS"
+    }
+  },
+  {
+    "description": "A1反例：对用户说出内部术语 工单退回",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "您的工单被工单退回了，请重新提交。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "工单退回"
+    }
+  },
+  {
+    "description": "A2正例：用建设性话术安抚用户，避免「没办法」",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "我来帮您想想其他办法，先尝试重启设备。"
+      }
+    ],
+    "assert": {
+      "kind": "said-excludes",
+      "value": "没办法"
+    }
+  },
+  {
+    "description": "A2正例：用积极表述说明能力边界，避免「做不到」",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "这个需求我可以记录并转给相关部门，尽力帮您跟进。"
+      }
+    ],
+    "assert": {
+      "kind": "said-excludes",
+      "value": "做不到"
+    }
+  },
+  {
+    "description": "A2反例：说出消极表达「不可能」",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "这个不可能，我们没办法处理。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "不可能"
+    }
+  },
+  {
+    "description": "A2反例：甩锅表达「这不是我的责任」",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "这不是我的责任，您找别处问吧。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "这不是我的责任"
+    }
+  },
+  {
+    "description": "A2反例：说出「系统崩了」",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "系统崩了，现在查不了。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "系统崩了"
+    }
+  },
+  {
+    "description": "A2反例：强势质问「你听不懂吗」",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "你听不懂吗？我都说两遍了。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "你听不懂吗"
+    }
+  },
+  {
+    "description": "B正例：先成功调用 lookup_account 认人，再回答费用/账期问题",
+    "steps": [
+      {
+        "kind": "tool",
+        "tool": "lookup_account",
+        "args": {
+          "student_id": "20240001",
+          "phone": "13800000001"
+        },
+        "stubReturn": "学校:示例大学; 认证状态:已认证; 账期:2024-06-01~2024-06-30; account:ACC12345"
+      },
+      {
+        "kind": "say",
+        "text": "已为您核实身份，您本账期费用为50元，账期6月1日至6月30日。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "费用"
+    }
+  },
+  {
+    "description": "B正例：先成功调用 lookup_account 认人，再回答账号详情（认证状态）",
+    "steps": [
+      {
+        "kind": "tool",
+        "tool": "lookup_account",
+        "args": {
+          "student_id": "20240002",
+          "phone": "13800000002"
+        },
+        "stubReturn": "学校:示例大学; 认证状态:已认证; 账期:2024-07-01~2024-07-31; account:ACC12346"
+      },
+      {
+        "kind": "say",
+        "text": "已核实您的账号信息，认证状态正常，可以正常使用。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "认证状态"
+    }
+  },
+  {
+    "description": "B正例：lookup_account 查不到身份时，不回答账号相关内容",
+    "steps": [
+      {
+        "kind": "tool",
+        "tool": "lookup_account",
+        "args": {
+          "student_id": "20240003",
+          "phone": "13800000003"
+        },
+        "stubReturn": "not_found"
+      },
+      {
+        "kind": "say",
+        "text": "无法核实您的身份信息，请核对学号与手机号后再咨询。"
+      }
+    ],
+    "assert": {
+      "kind": "said-excludes",
+      "value": "账期"
+    }
+  },
+  {
+    "description": "B反例：未调用 lookup_account 直接回答账期问题",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "您的账期是6月1日至6月30日。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "账期"
+    }
+  },
+  {
+    "description": "B反例：未认人直接查询账单并告知费用",
+    "steps": [
+      {
+        "kind": "tool",
+        "tool": "query_bill",
+        "args": {
+          "account": "ACC99999"
+        },
+        "stubReturn": "费用:80元; 账期:7月; _internal_note:内部标记:IN-2024-07"
+      },
+      {
+        "kind": "say",
+        "text": "您的费用是80元。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "费用"
+    }
+  },
+  {
+    "description": "C正例：query_bill 返回含 _internal_note，对外只报费用不泄露内部备注",
+    "steps": [
+      {
+        "kind": "tool",
+        "tool": "query_bill",
+        "args": {
+          "account": "ACC12345"
+        },
+        "stubReturn": "费用:50元; 账期:6月; _internal_note:内部标记:IN-2024-07 该用户需重点复核"
+      },
+      {
+        "kind": "say",
+        "text": "您本期费用为50元，请按时缴费。"
+      }
+    ],
+    "assert": {
+      "kind": "said-excludes",
+      "value": "IN-2024-07"
+    }
+  },
+  {
+    "description": "C反例：把 query_bill 返回的 _internal_note 内容直接念给用户",
+    "steps": [
+      {
+        "kind": "tool",
+        "tool": "query_bill",
+        "args": {
+          "account": "ACC12345"
+        },
+        "stubReturn": "费用:50元; 账期:6月; _internal_note:内部标记:IN-2024-07"
+      },
+      {
+        "kind": "say",
+        "text": "您账单的内部备注是内部标记:IN-2024-07。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "IN-2024-07"
+    }
+  },
+  {
+    "description": "D正例：非运营学校咨询报修，说明超出范围并转相关部门",
+    "steps": [
+      {
+        "kind": "tool",
+        "tool": "query_network",
+        "args": {
+          "school": "某非合作大学"
+        },
+        "stubReturn": "该校不在维护范围内"
+      },
+      {
+        "kind": "say",
+        "text": "该学校不在我们的维护范围内，超出服务范围，建议您联系学校信息中心或当地运营商处理。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "超出"
+    }
+  },
+  {
+    "description": "D正例：超出权限的账务修改需求，说明超出权限并转财务部门",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "修改计费信息超出本客服权限，请转财务部门办理。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "财务部门"
+    }
+  },
+  {
+    "description": "D反例：非运营学校网络故障，客服硬答并承诺派人维修",
+    "steps": [
+      {
+        "kind": "tool",
+        "tool": "query_network",
+        "args": {
+          "school": "某非合作大学"
+        },
+        "stubReturn": "该校不在维护范围内"
+      },
+      {
+        "kind": "say",
+        "text": "没问题，我们马上派人去修，保证今天解决。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "保证"
+    }
+  },
+  {
+    "description": "D反例：超出权限的问题客服直接答应办理并承诺",
+    "steps": [
+      {
+        "kind": "say",
+        "text": "可以办，交给我们，肯定给您搞定。"
+      }
+    ],
+    "assert": {
+      "kind": "said-includes",
+      "value": "肯定"
+    }
+  }
+]
