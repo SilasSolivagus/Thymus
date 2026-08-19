@@ -12,9 +12,12 @@ trap cleanup EXIT
 
 set -a; . "$ROOT/.env.local"; set +a
 export THYMUS_STORE="$ROOT/thymus/trajectories"
+export THYMUS_OUT="$ROOT/thymus/campus/submitted"
 git -C "$DSH" apply "$ROOT/probes/scope-fix.patch"
 mkdir -p "$DSH/thymus-demo/src" "$DSH/thymus-demo/demo"
 cp "$ROOT"/thymus/src/*.ts "$DSH/thymus-demo/src/"
 cp "$ROOT"/thymus/demo/*.ts "$DSH/thymus-demo/demo/"
+mkdir -p "$DSH/thymus-demo/campus"
+cp "$ROOT"/thymus/campus/*.ts "$DSH/thymus-demo/campus/" 2>/dev/null || true
 cd "$DSH"
-CI=true corepack pnpm exec tsx "thymus-demo/demo/${DEMO:-run}.ts"
+CI=true corepack pnpm exec tsx "thymus-demo/${DEMODIR:-demo}/${DEMO:-run}.ts"
