@@ -20,11 +20,12 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
 import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -32,6 +33,7 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import Jsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { judgeCases, type EvalCase } from '../src/eval-framework.ts'
+import { lastTurnOutcome, type TurnOutcome } from '../src/turn.ts'
 
 const MODEL = process.env.THYMUS_MODEL ?? 'deepseek-chat'
 const STORE = process.env.THYMUS_STORE ?? resolve(process.cwd(), 'thymus/trajectories')
@@ -129,10 +131,26 @@ async function newAgent(ctx: Context, sessionId: string): Promise<Agent> {
   return handle.agent
 }
 
-async function say(agent: Agent, text: string): Promise<void> {
+/**
+ * 对 agent 说一句并等它跑完，把这一轮的结束情况带回来。
+ * 只等 whenIdle() 会把传输失败当成「模型什么都没做」，测量因此不可信——
+ * campus 主线三轮反馈有两轮是这样空转的（FINDINGS-03 二）。
+ */
+async function say(agent: Agent, text: string): Promise<TurnOutcome> {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
   await agent.whenIdle()
   await new Promise(r => setTimeout(r, 400))
+  const outcome = lastTurnOutcome([...agent.session.events] as SessionEvent[])
+  if (!outcome.ok) console.log(`  ⚠ 本轮未正常结束：${outcome.reason}`)
+  return outcome
+}
+
+/** 说一句，本轮没正常结束就再试一次。返回最终结果。 */
+async function sayWithRetry(agent: Agent, text: string): Promise<TurnOutcome> {
+  const first = await say(agent, text)
+  if (first.ok) return first
+  console.log('  重试一次')
+  return say(agent, text)
 }
 
 /** 评测用例的形状说明，出题 agent 和判定器共用同一份契约。 */
@@ -200,7 +218,7 @@ async function main(): Promise<void> {
     },
   })
   const author = await newAgent(authorCtx, 'campus-author')
-  await say(author, `约束 spec：\n\n${SPEC}\n\n业务系统：${TOOLS_DESC}\n\n`
+  await sayWithRetry(author, `约束 spec：\n\n${SPEC}\n\n业务系统：${TOOLS_DESC}\n\n`
     + `请设计评测用例，A/B/C/D 四类每类都要有正例和反例。\n${EVAL_SHAPE}\n用 submit_evals 提交。`)
   const frozen = evalSink.flat()
   if (frozen.length === 0) { console.log('✗ 未出题'); return }
@@ -229,7 +247,7 @@ async function main(): Promise<void> {
     },
   })
   const dev = await newAgent(devCtx, 'campus-dev')
-  await say(dev, `请实现满足这份 spec 的运行时插件。四类约束请按单一职责拆成多个插件，各自用 submit_plugin 提交。\n\n`
+  await sayWithRetry(dev, `请实现满足这份 spec 的运行时插件。四类约束请按单一职责拆成多个插件，各自用 submit_plugin 提交。\n\n`
     + `spec：\n${SPEC}\n\n业务系统：${TOOLS_DESC}\n\n${CHANNELS}`)
   console.log(`\n开发 agent 提交了 ${byConcern.size} 个插件（关注点：${[...byConcern.keys()].sort().join(',')}）。`)
   box('提交插件的静态复查')
@@ -237,6 +255,7 @@ async function main(): Promise<void> {
 
   // ③ 组合评测 + 反馈
   let round = 0
+  let idleRounds = 0
   let result = { passed: false, diffs: ['未提交'] as string[] }
   while (round < MAX_ROUNDS && byConcern.size > 0) {
     round++
@@ -245,8 +264,9 @@ async function main(): Promise<void> {
     console.log(`\n✗ 第 ${round} 轮组合评测未通过（${result.diffs.length} 处）：`)
     for (const d of result.diffs.slice(0, 8)) console.log(`    · ${d}`)
     if (round < MAX_ROUNDS) {
-      await say(dev, `组合评测未通过，可观测差异：\n${result.diffs.map(d => `- ${d}`).join('\n')}\n\n`
+      const fed = await sayWithRetry(dev, `组合评测未通过，可观测差异：\n${result.diffs.map(d => `- ${d}`).join('\n')}\n\n`
         + `请修正对应关注点的插件——用 submit_plugin 并填该关注点原来的 concern（会替换旧版本，不要新增）。`)
+      if (!fed.ok) { idleRounds++; console.log(`  本轮未修正：反馈未送达，不计为模型没修好`) }
       console.log(`  （修正后共 ${byConcern.size} 个插件）`)
       for (const [c, src] of [...byConcern].sort()) writeFileSync(resolve(OUT, `plugin-${c}.js`), src)
     }
@@ -270,9 +290,14 @@ async function main(): Promise<void> {
   box('总账')
   console.log(`  一个目标 → ${byConcern.size} 个插件（关注点：${concerns.join(',')}）`)
   console.log(`  评测：${frozen.length} 条，其中判说话通道 ${sayCases} 条`)
-  console.log(`  组合评测：${result.passed ? '通过' : '未通过'}（${round} 轮）`)
+  console.log(`  组合评测：${result.passed ? '通过' : '未通过'}（${round} 轮，`
+    + `其中 ${idleRounds} 轮反馈未送达，模型实得 ${round - idleRounds} 次机会）`)
   console.log(`  消融归因：${result.passed && concerns.length > 1 ? '已执行' : '略'}`)
   console.log(`  会话已落盘 ${STORE}，插件与评测已另存 ${OUT}。`)
 }
 
-main().catch((e: unknown) => { console.error('\n运行失败：', e instanceof Error ? e.message : e); process.exitCode = 1 })
+// 只在被直接执行时跑。顶层无条件 main() 会让任何 import 都重跑整个实验——
+// 已经因此覆盖过一次冻结的评测用例。
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e: unknown) => { console.error('\n运行失败：', e instanceof Error ? e.message : e); process.exitCode = 1 })
+}
