@@ -7,11 +7,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DSH="$ROOT/vendor/deepseek-harness"
 DEST="$DSH/packages/extensions/cordis-host-runner/tests"
 
-cleanup() { rm -rf "$DEST/thymus-src" "$DEST/thymus-trajectory.spec.ts" "$DEST/thymus-recording.spec.ts" "$DEST/thymus-judge.spec.ts" "$DEST/thymus-eval-framework.spec.ts" "$DEST/thymus-composite.spec.ts" "$DEST/thymus-turn.spec.ts" "$DEST/thymus-speech-eval.spec.ts" "$DEST/thymus-gate.spec.ts"; }
+cleanup() { rm -rf "$DEST/thymus-src" "$DEST/thymus-trajectory.spec.ts" "$DEST/thymus-recording.spec.ts" "$DEST/thymus-judge.spec.ts" "$DEST/thymus-eval-framework.spec.ts" "$DEST/thymus-composite.spec.ts" "$DEST/thymus-turn.spec.ts" "$DEST/thymus-speech-eval.spec.ts" "$DEST/thymus-gate.spec.ts" "$DEST/thymus-multiplugin.spec.ts"; }
 trap cleanup EXIT
 
 mkdir -p "$DEST/thymus-src"
 cp "$ROOT"/thymus/src/*.ts "$DEST/thymus-src/"
-cp "$ROOT/thymus/thymus-trajectory.spec.ts" "$ROOT/thymus/thymus-recording.spec.ts" "$ROOT/thymus/thymus-judge.spec.ts" "$ROOT/thymus/thymus-eval-framework.spec.ts" "$ROOT/thymus/thymus-composite.spec.ts" "$ROOT/thymus/thymus-speech-eval.spec.ts" "$ROOT/thymus/thymus-turn.spec.ts" "$ROOT/thymus/thymus-gate.spec.ts" "$DEST/"
+cp "$ROOT/thymus/thymus-trajectory.spec.ts" "$ROOT/thymus/thymus-recording.spec.ts" "$ROOT/thymus/thymus-judge.spec.ts" "$ROOT/thymus/thymus-eval-framework.spec.ts" "$ROOT/thymus/thymus-composite.spec.ts" "$ROOT/thymus/thymus-speech-eval.spec.ts" "$ROOT/thymus/thymus-turn.spec.ts" "$ROOT/thymus/thymus-gate.spec.ts" "$ROOT/thymus/thymus-multiplugin.spec.ts" "$DEST/"
 cd "$DSH"
-CI=true corepack pnpm vitest run packages/extensions/cordis-host-runner/tests/thymus-trajectory.spec.ts packages/extensions/cordis-host-runner/tests/thymus-recording.spec.ts packages/extensions/cordis-host-runner/tests/thymus-judge.spec.ts packages/extensions/cordis-host-runner/tests/thymus-eval-framework.spec.ts packages/extensions/cordis-host-runner/tests/thymus-composite.spec.ts packages/extensions/cordis-host-runner/tests/thymus-turn.spec.ts packages/extensions/cordis-host-runner/tests/thymus-speech-eval.spec.ts packages/extensions/cordis-host-runner/tests/thymus-gate.spec.ts
+CI=true corepack pnpm vitest run packages/extensions/cordis-host-runner/tests/thymus-trajectory.spec.ts packages/extensions/cordis-host-runner/tests/thymus-recording.spec.ts packages/extensions/cordis-host-runner/tests/thymus-judge.spec.ts packages/extensions/cordis-host-runner/tests/thymus-eval-framework.spec.ts packages/extensions/cordis-host-runner/tests/thymus-composite.spec.ts packages/extensions/cordis-host-runner/tests/thymus-turn.spec.ts packages/extensions/cordis-host-runner/tests/thymus-speech-eval.spec.ts packages/extensions/cordis-host-runner/tests/thymus-gate.spec.ts packages/extensions/cordis-host-runner/tests/thymus-multiplugin.spec.ts
