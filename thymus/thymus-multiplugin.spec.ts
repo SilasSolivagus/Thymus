@@ -20,7 +20,7 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
-import { gateSay, type Constraint } from './thymus-src/gate.ts'
+import { gateSay, judgeText, type Constraint } from './thymus-src/gate.ts'
 
 const SESSION = 'multi'
 const agent = { id: SESSION } as never
@@ -160,5 +160,119 @@ describe('多插件 · llm/stream 上的互相污染', () => {
     expect(judge.seen.sort()).toEqual(['<A>您好', '<B>您好'])   // 各判一次，判的都是用户原话
     expect(r.assembled).toBe('您好')                            // 用户正文没被判定协议碰过
     expect(r.verdict.kind).toBe('allow')
+  })
+})
+
+// ── fail-open 路径：模型调用真的失败时会怎样 ──
+// HANDOFF 从上一轮就挂着「fail-open / fail-closed 路径零失败，没走到过，没有数据」。
+// 用会抛错的假 adapter 直接打，两侧都打：插件侧（自己 catch 落回词表）与网关侧。
+
+/** 每次调用都抛错的假模型。 */
+class FailingJudge extends LlmAdapter {
+  calls = 0
+  // eslint-disable-next-line require-yield
+  async * stream(): AsyncIterable<StreamChunk> {
+    this.calls++
+    throw new Error('上游炸了')
+  }
+}
+
+/** 语义插件：调模型失败时落回字面词表（发现 04/05 里模型自己写的那种兜底）。 */
+const FALLBACK_PLUGIN = `
+  return { name:'guard-fallback', inject:['llm'], apply(ctx){
+    ctx.on('llm/stream',(options,next)=>{
+      if (options.provider === 'fail') return next();
+      const up = next();
+      return (async function*(){
+        for await (const c of up) {
+          if (c && c.type === 'text-delta') continue;
+          if (c && c.type === 'block-end' && c.block && c.block.type === 'text') {
+            let out;
+            try {
+              for await (const j of ctx.llm.stream({ provider:'fail', model:'fail', messages:[
+                { role:'user', content:[{type:'text',text:c.block.text}], source:{kind:'user'} }] })) {
+                if (j && j.type === 'block-end' && j.block && j.block.type === 'text') out = j.block.text;
+              }
+            } catch (e) {
+              out = c.block.text.split('不可能').join('需进一步确认');   // 落回词表
+            }
+            if (out === undefined) out = c.block.text;
+            yield { type:'text-delta', index:c.index, text: out };
+            yield { ...c, block: { ...c.block, text: out } };
+            continue;
+          }
+          yield c;
+        }
+      })();
+    });
+  } }`
+
+describe('fail 路径 · 模型调用真的失败时', () => {
+  it('论证34 插件侧：模型失败不抛错，插件的词表兜底根本不执行——原文原样漏出', async () => {
+    const ctx = new Context()
+    await ctx.plugin(Timer); await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime)
+    await ctx.plugin(DynamicCordisRunner, {})
+    const failing = new FailingJudge()
+    ctx.llm.registerAdapter(['fail'], failing)
+    await mount(ctx, FALLBACK_PLUGIN, 'flb', 'guard-fallback')
+    const r = await gateSay(ctx, '这个不可能', [])
+    expect(failing.calls).toBeGreaterThan(0)     // 确实走到了失败路径
+    // ★ ctx.llm.stream 失败时不抛错，而是发 finish{reason.kind:'error'} 然后正常结束。
+    // 插件的 try/catch 不触发，out 保持 undefined，落到「原文原样」——fail-open。
+    expect(r.assembled).toBe('这个不可能')
+  })
+
+  it('论证35 同样地，词表外的同义表达也原样漏出', async () => {
+    const ctx = new Context()
+    await ctx.plugin(Timer); await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime)
+    await ctx.plugin(DynamicCordisRunner, {})
+    ctx.llm.registerAdapter(['fail'], new FailingJudge())
+    await mount(ctx, FALLBACK_PLUGIN, 'flb', 'guard-fallback')
+    const r = await gateSay(ctx, '这事我管不了', [])
+    expect(r.assembled).toBe('这事我管不了')
+  })
+
+  it('论证36 网关侧：约束只 for-await 的话同样 fail-open，返回 allow', async () => {
+    const ctx = new Context()
+    await ctx.plugin(Timer); await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime)
+    await ctx.plugin(DynamicCordisRunner, {})
+    ctx.llm.registerAdapter(['fail'], new FailingJudge())
+    const judging: Constraint = {
+      name: 'semantic',
+      say: async (text: string) => {
+        for await (const _c of ctx.llm.stream({
+          provider: 'fail', model: 'fail',
+          messages: [{ role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }],
+        } as never)) { /* 不会走到这里 */ }
+        return { kind: 'allow' } as const
+      },
+    }
+    const r = await gateSay(ctx, '这事我管不了', [judging])
+    // ★ 没抛错，所以 adjudicate 那三道保险（抛错/超时/非法判决）一道都没触发
+    expect(r.verdict.kind).toBe('allow')
+  })
+
+  it('论证37 改用 judgeText 之后：失败被暴露成抛错，网关按 deny 处理', async () => {
+    const ctx = new Context()
+    await ctx.plugin(Timer); await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime)
+    await ctx.plugin(DynamicCordisRunner, {})
+    ctx.llm.registerAdapter(['fail'], new FailingJudge())
+    const judging: Constraint = {
+      name: 'semantic',
+      say: async (text: string) => {
+        await judgeText(ctx, {
+          provider: 'fail', model: 'fail',
+          messages: [{ role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }],
+        } as never)
+        return { kind: 'allow' } as const
+      },
+    }
+    const r = await gateSay(ctx, '这事我管不了', [judging])
+    expect(r.verdict.kind).toBe('deny')
+    expect(r.verdict.kind === 'deny' && r.verdict.reason).toContain('未正常结束')
   })
 })

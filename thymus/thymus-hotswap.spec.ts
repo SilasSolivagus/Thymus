@@ -239,3 +239,50 @@ describe('热替换 · 换到一半失败', () => {
     expect(after.text).toContain('网关拒绝')
   })
 })
+
+// ── 多插件场景下的换版：换 A 会不会碰到 B ──
+
+describe('热替换 · 多插件互不干扰', () => {
+  it('论证32 换 A 不影响 B：B 的约束照常生效', async () => {
+    const ctx = await boot()
+    const a = await mountFirst(ctx, denyPlugin('a1'), 'mua')
+    // B 拦另一个工具，用它来观察 B 有没有被换 A 的动作波及
+    const b = await mountFirst(ctx, `
+      return { name:'deny-b', apply(ctx){
+        ctx.on('tools/pre-execute',(e,next)=>
+          e.name==='slow_tool' ? Promise.resolve({kind:'deny',reason:'b1 拒绝'}) : next());
+      } }`, 'mub')
+    expect(b.length).toBeGreaterThan(0)
+    const callSlow = async (): Promise<{ isError: boolean; text: string }> => {
+      const res = await ctx.tools.execute({
+        signal: new AbortController().signal,
+        callId: CallId(`mu-${Math.floor(performance.now())}`),
+        name: 'slow_tool', arguments: {}, agent,
+      })
+      const f = res.content[0]
+      return { isError: res.isError, text: f?.type === 'text' ? f.text : '' }
+    }
+    expect((await callSlow()).text).toContain('b1 拒绝')
+
+    expect(await swap(ctx, a, denyPlugin('a2'), 'a2')).toBe(true)
+    expect((await callDelete(ctx)).text).toContain('a2 拒绝')   // A 换成功
+    expect((await callSlow()).text).toContain('b1 拒绝')        // B 没被波及
+  })
+
+  it('论证33 换 A 失败把 A 的约束带走，但带不走 B', async () => {
+    const ctx = await boot()
+    const a = await mountFirst(ctx, denyPlugin('a1'), 'muc')
+    await mountFirst(ctx, `
+      return { name:'deny-b', apply(ctx){
+        ctx.on('tools/pre-execute',(e,next)=>
+          e.name==='slow_tool' ? Promise.resolve({kind:'deny',reason:'b1 拒绝'}) : next());
+      } }`, 'mud')
+    expect(await swap(ctx, a, THROWS_ON_APPLY, 'boom')).toBe(false)
+    expect((await callDelete(ctx)).isError).toBe(false)          // A 的约束没了（发现 14）
+    const res = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: CallId('mu-b'), name: 'slow_tool', arguments: {}, agent,
+    })
+    expect(res.isError).toBe(true)                               // B 仍在，损失被限制在 A
+  })
+})

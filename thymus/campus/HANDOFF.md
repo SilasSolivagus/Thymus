@@ -29,6 +29,7 @@
 | 12 | 基线双峰，n=3 分不出来；05/07 的门控频率降为 3/7，11 的质量结论撤回 | `FINDINGS-12-baseline-variance.md` |
 | 13 | 两个语义插件挂一起会无限递归；判定放进网关则互不污染 | `FINDINGS-13-multiplugin-pollution.md` |
 | 14 | 热替换干净；但决策途中换版会让该次调用失败（方向是不放行），且 run 阶段换版失败会把旧约束带走 | `FINDINGS-14-hotswap.md` |
+| 15 | 模型调用失败不抛错而是发 error finish——插件词表兜底不执行、网关 fail-closed 被绕过 | `FINDINGS-15-silent-llm-failure.md` |
 
 **分层结论：写规矩，模型能；判自己写得对不对，现在不能；语义那部分，机制上够到边了，
 模型也会走，但它第一版有相当比例会把旧机制留在前门、收益自己抵消
@@ -130,7 +131,9 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   结论：语义约束这一类不该写成 `llm/stream` 插件。
 - 判定器只看到孤立一句，没有会话上下文与工具调用事实，改写会凭空补事实
   （「我这就为您转接」），**A2 违规可能换成 B/D 违规**。未交叉验证。
-- fail-open / fail-closed 路径零失败，没走到过，没有数据。
+- ~~fail-open / fail-closed 路径零失败~~ **已打，见发现 15**：两侧兜底都是假的。
+  `ctx.llm.stream` 失败时不抛错，发 error finish 后正常结束，try/catch 不触发。
+  已加 `judgeText()` 把静默失败翻成异常；判定调用一律走它。
 - `thymus-recording.spec.ts` 偶发失败（`persistence.list()` 偶尔读不到 rec-1），两跑一挂，
   既有问题，未查。跑到它挂就重跑。
 - 其余 demo（`../demo/spec-composite`、`spec-tiers`、`spec-evals`、`run`、`self-authored`）

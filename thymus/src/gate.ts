@@ -115,6 +115,40 @@ export function installToolGate(
   }
 }
 
+/**
+ * 安全地调一次模型并取回文本：**失败以抛错的形式暴露出来**。
+ *
+ * 直接用 `ctx.llm.stream` 有个坑：调用失败时它**不抛错**，而是发一个
+ * `{ type:'finish', reason:{ kind:'error', … } }` 然后正常结束。只写 try/catch 的
+ * 调用方拿到的是空文本并把它当成成功——于是 fail-open。实测：插件侧的词表兜底
+ * 不会执行，网关侧的约束会返回 allow。
+ *
+ * 判定用的模型调用必须走这个函数，不要直接 for-await `ctx.llm.stream`。
+ *
+ * @param ctx - 宿主 context。
+ * @param options - 传给 `ctx.llm.stream` 的请求。
+ * @returns 装配后的文本。
+ * @throws 调用未以 `stop` 结束时抛错——交给 {@link adjudicate} 按 deny 处理。
+ */
+export async function judgeText(ctx: Context, options: GenerateOptions): Promise<string> {
+  let text = ''
+  let finished = false
+  for await (const chunk of ctx.llm.stream(options)) {
+    const c = chunk as { type?: string; text?: string; block?: { type?: string; text?: string }; reason?: { kind?: string; failure?: { message?: string } } }
+    if (c.type === 'text-delta' && typeof c.text === 'string') text += c.text
+    else if (c.type === 'block-end' && c.block?.type === 'text' && typeof c.block.text === 'string') text = c.block.text
+    else if (c.type === 'finish') {
+      finished = true
+      if (c.reason?.kind !== 'stop') {
+        throw new Error(`判定调用未正常结束：${c.reason?.kind ?? '未知'}`
+          + `${c.reason?.failure?.message === undefined ? '' : `（${c.reason.failure.message}）`}`)
+      }
+    }
+  }
+  if (!finished) throw new Error('判定调用没有给出结束原因')
+  return text
+}
+
 /** 说话通道的假上游：一段文本按 dsh 的 chunk 协议发出。 */
 function sayUpstream(text: string): AsyncIterable<StreamChunk> {
   return (async function* (): AsyncGenerator<StreamChunk> {
