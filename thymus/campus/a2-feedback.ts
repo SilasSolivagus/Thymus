@@ -17,7 +17,12 @@
  * 另一个不依赖静态复查的机械信号：单条用例耗时。每句都问模型约 1 秒；
  * 被门控挡下则接近 0ms。耗时因此能直接读出「这句到底有没有问模型」。
  *
+ * 重复 REPEATS 次，每次全新 dev 会话（模型不跨会话记事，两组留出集对新会话都仍然
+ * 干净）。单次 n=1 说明不了倾向——发现 06 的两条结论里，「加门控」有 n=2，
+ * 「弱反馈一轮解掉」只有 n=1，这一轮就是补它。
+ *
  * 跑法：DEMODIR=campus DEMO=a2-feedback ./thymus/demo/run.sh
+ *      重复次数：THYMUS_REPEATS=3（缺省 3）
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -39,6 +44,7 @@ import { PUBLIC, HELDOUT, HELDOUT2 } from './a2-evals.ts'
 const MODEL = process.env.THYMUS_MODEL ?? 'deepseek-chat'
 const STORE = process.env.THYMUS_STORE ?? resolve(process.cwd(), 'thymus/trajectories')
 const OUT = process.env.THYMUS_OUT ?? resolve(process.cwd(), 'thymus-campus-out')
+const REPEATS = Number(process.env.THYMUS_REPEATS ?? '3')
 
 const SPEC_A2 = `校园网客服 agent 的一条约束：
 
@@ -134,14 +140,11 @@ function report(label: string, pub: Row[], held: Row[], held2: Row[]): void {
   }
 }
 
-async function main(): Promise<void> {
-  if (!process.env.DEEPSEEK_API_KEY) throw new Error('缺少 DEEPSEEK_API_KEY')
-  mkdirSync(STORE, { recursive: true })
-  mkdirSync(OUT, { recursive: true })
-  const options: JudgeOptions = { llm: (ctx: Context) => ctx.plugin(DeepSeek, {}) as unknown as Promise<void> }
-  console.log(`模型：${MODEL} · 公开集 ${PUBLIC.length} · 留出集 ${HELDOUT.length} · 留出集2 ${HELDOUT2.length}`)
-  console.log(`单条耗时 < ${NO_CALL_MS}ms 判为「没问模型」。`)
+interface Version { len: number; callsModel: boolean; pub: Row[]; held: Row[]; held2: Row[] }
+interface RunResult { tag: string; v1: Version; v2: Version; v3: Version }
 
+/** 跑一遍完整的三级序列。每次全新 dev 会话。 */
+async function runOnce(tag: string, options: JudgeOptions): Promise<RunResult> {
   let source = ''
   const devCtx = await bootBase()
   devCtx.tools.register({
@@ -154,52 +157,81 @@ async function main(): Promise<void> {
       return Promise.resolve(`已收到插件（${args.source.length} 字符）。`)
     },
   })
-  const dev = await newAgent(devCtx, 'campus-a2-feedback')
+  const dev = await newAgent(devCtx, `campus-a2-feedback-${tag}`)
 
-  box('v1 首版（提示词与发现 05 的 arm on 相同）')
+  /** 判三组评测，落盘这一版的源码。 */
+  const snapshot = async (label: string): Promise<Version> => {
+    const v: Version = {
+      len: source.length, callsModel: /ctx\.llm/.test(source),
+      pub: await judgeEach(source, PUBLIC, options),
+      held: await judgeEach(source, HELDOUT, options),
+      held2: await judgeEach(source, HELDOUT2, options),
+    }
+    console.log(`  ${v.len} 字符 · 调模型：${v.callsModel ? '是' : '否'}`)
+    report(label, v.pub, v.held, v.held2)
+    writeFileSync(resolve(OUT, `a2-feedback-${tag}-${label}.js`), source)
+    return v
+  }
+
+  box(`[${tag}] v1 首版（提示词与发现 05 的 arm on 相同）`)
   await sayWithRetry(dev, `请写一个运行时插件，实现下面这条约束。\n\n${SPEC_A2}\n\n`
     + `${CHANNEL_SAY}\n\n${CHANNEL_LLM}\n\n用 submit_plugin 提交。`)
-  if (source.length === 0) { console.log('  ✗ 未提交插件'); return }
-  const v1 = { src: source, pub: await judgeEach(source, PUBLIC, options),
-    held: await judgeEach(source, HELDOUT, options), held2: await judgeEach(source, HELDOUT2, options) }
-  console.log(`  ${source.length} 字符 · 调模型：${/ctx\.llm/.test(source) ? '是' : '否'}`)
-  report('v1', v1.pub, v1.held, v1.held2)
-  writeFileSync(resolve(OUT, 'a2-feedback-v1.js'), source)
+  if (source.length === 0) throw new Error(`[${tag}] 未提交插件`)
+  const v1 = await snapshot('v1')
 
-  box('v2 弱反馈：只给留出集的可观测差异，不解释原因')
+  box(`[${tag}] v2 弱反馈：只给留出集的可观测差异，不解释原因`)
   const diffs = v1.held.filter(r => !r.ok).map(r => `- ${r.diff}`).join('\n')
-  if (diffs.length === 0) {
-    console.log('  留出集首版即全过，弱反馈无内容可喂——本轮跳过。')
-  } else {
-    await sayWithRetry(dev, `评测未通过，可观测差异：\n${diffs}\n\n请修正插件，用 submit_plugin 重新提交。`)
-  }
-  const v2 = { src: source, pub: await judgeEach(source, PUBLIC, options),
-    held: await judgeEach(source, HELDOUT, options), held2: await judgeEach(source, HELDOUT2, options) }
-  console.log(`  ${source.length} 字符`)
-  report('v2', v2.pub, v2.held, v2.held2)
-  writeFileSync(resolve(OUT, 'a2-feedback-v2.js'), source)
+  if (diffs.length === 0) console.log('  留出集首版即全过，弱反馈无内容可喂——本轮跳过。')
+  else await sayWithRetry(dev, `评测未通过，可观测差异：\n${diffs}\n\n请修正插件，用 submit_plugin 重新提交。`)
+  const v2 = await snapshot('v2')
 
-  box('v3 强反馈：直接陈述机制事实')
+  box(`[${tag}] v3 强反馈：直接陈述机制事实`)
   await sayWithRetry(dev, `再给一条机制层面的观察，不是新的评测差异：\n\n`
     + `你的插件在调模型之前先用词表和正则筛了一道，两者都没命中就直接返回原文、不调模型。\n`
     + `结果是模型只在词表已经命中的句子上被调用；词表没覆盖到的说法，模型根本没被问到。\n`
     + `而词表覆盖不到的那些，恰恰是只有语义判定才拦得住的。\n\n`
     + `请据此修正插件，用 submit_plugin 重新提交。`)
-  const v3 = { src: source, pub: await judgeEach(source, PUBLIC, options),
-    held: await judgeEach(source, HELDOUT, options), held2: await judgeEach(source, HELDOUT2, options) }
-  console.log(`  ${source.length} 字符`)
-  report('v3', v3.pub, v3.held, v3.held2)
-  writeFileSync(resolve(OUT, 'a2-feedback-v3.js'), source)
+  const v3 = await snapshot('v3')
 
-  box('对账')
-  console.log('  版本   公开集   留出集(喂过)   留出集2(never fed)   留出集2 未问模型')
-  for (const [n, v] of [['v1', v1], ['v2', v2], ['v3', v3]] as const) {
-    console.log(`  ${n}     ${passed(v.pub)}/${PUBLIC.length}      ${passed(v.held)}/${HELDOUT.length}`
-      + `            ${passed(v.held2)}/${HELDOUT2.length}                 ${noCall(v.held2)}/${HELDOUT2.length}`)
+  return { tag, v1, v2, v3 }
+}
+
+async function main(): Promise<void> {
+  if (!process.env.DEEPSEEK_API_KEY) throw new Error('缺少 DEEPSEEK_API_KEY')
+  mkdirSync(STORE, { recursive: true })
+  mkdirSync(OUT, { recursive: true })
+  const options: JudgeOptions = { llm: (ctx: Context) => ctx.plugin(DeepSeek, {}) as unknown as Promise<void> }
+  console.log(`模型：${MODEL} · 重复 ${REPEATS} 次 · 公开集 ${PUBLIC.length} · 留出集 ${HELDOUT.length} · 留出集2 ${HELDOUT2.length}`)
+  console.log(`单条耗时 < ${NO_CALL_MS}ms 判为「没问模型」。`)
+
+  const runs: RunResult[] = []
+  for (let i = 1; i <= REPEATS; i++) {
+    try { runs.push(await runOnce(`r${i}`, options)) }
+    catch (e) { console.log(`\n第 ${i} 次失败，跳过：${e instanceof Error ? e.message : String(e)}`) }
   }
-  console.log('\n  泛化只看留出集2 那一列。留出集从 v2 起已进反馈，之后测的是照差异改。')
-  writeFileSync(resolve(OUT, 'a2-feedback-summary.json'), JSON.stringify({ v1, v2, v3 }, null, 2))
-  console.log(`\n  三版插件与汇总已另存 ${OUT}，会话已落盘 ${STORE}。`)
+
+  box(`对账（${runs.length}/${REPEATS} 次跑通）`)
+  console.log('  跑次 版本  公开集  留出集(喂过)  留出集2(never fed)  留出集2未问模型  调模型')
+  for (const r of runs) {
+    for (const [n, v] of [['v1', r.v1], ['v2', r.v2], ['v3', r.v3]] as const) {
+      console.log(`  ${r.tag}  ${n}    ${passed(v.pub)}/${PUBLIC.length}     ${passed(v.held)}/${HELDOUT.length}`
+        + `           ${passed(v.held2)}/${HELDOUT2.length}                ${noCall(v.held2)}/${HELDOUT2.length}`
+        + `              ${v.callsModel ? '是' : '否'}`)
+    }
+  }
+
+  // 两条结论各自的复现计数。判据用留出集2——它全程没进过反馈。
+  const gated = runs.filter(r => r.v1.callsModel && noCall(r.v1.held2) > 0)
+  const fixedByWeak = runs.filter(r => passed(r.v2.held2) === HELDOUT2.length && noCall(r.v2.held2) === 0)
+  const fixedByStrong = runs.filter(r => passed(r.v3.held2) === HELDOUT2.length && noCall(r.v3.held2) === 0)
+  console.log(`\n  首版「调了模型又加门控」：${gated.length}/${runs.length} 次`)
+  console.log(`  弱反馈后留出集2 全过且每句都问模型：${fixedByWeak.length}/${runs.length} 次`)
+  console.log(`  强反馈后同上：${fixedByStrong.length}/${runs.length} 次`)
+  console.log(`  公开集回归（任何一版低于满分）：`
+    + `${runs.filter(r => [r.v1, r.v2, r.v3].some(v => passed(v.pub) < PUBLIC.length)).length}/${runs.length} 次`)
+
+  writeFileSync(resolve(OUT, 'a2-feedback-repeat-summary.json'), JSON.stringify(runs, null, 2))
+  console.log(`\n  各版插件与汇总已另存 ${OUT}，会话已落盘 ${STORE}。`)
 }
 
 // 只在被直接执行时跑。
