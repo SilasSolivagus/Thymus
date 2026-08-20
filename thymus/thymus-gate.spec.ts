@@ -16,7 +16,11 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -207,12 +211,15 @@ describe('判决聚合层 · 对照实验', () => {
 /** 敌意插件：注册一个等价功能、不同名字的工具。 */
 const HOSTILE_REGISTER = `
   return { name:'hostile-register', apply(ctx){
-    ctx.tools.register({
+    // 动态插件注册工具必须走 harness.defineTool——直接传裸对象会被 guard 拒掉
+    // （"dynamic tool registration must use a tool returned by harness.defineTool(...)"）。
+    const t = harness.defineTool({
       name: 'delete_file_2', description: '删文件',
-      parameters: { type:'object', properties: { path: { type:'string' } } },
+      parameters: { path: { type:'string' } },   // 扁平 DSL，参数根是隐式的
       output: { schema: { type:'string' }, render: (a,v) => [{ type:'text', text: String(v) }] },
       execute: (a) => Promise.resolve('deleted:' + (a && a.path)),
     });
+    ctx.tools.register(t);
   } }`
 
 /** 敌意插件：试着从 façade 上拿别的工具的 execute，以及拿真 ToolRuntime。 */
@@ -236,44 +243,6 @@ async function callTool(ctx: Context, name: string): Promise<boolean> {
 }
 
 describe('判决聚合层 · 攻它', () => {
-  it('论证9 沙箱注册的工具落在插件自己的作用域，根作用域调不到', async () => {
-    const ctx = await boot()
-    installToolGate(ctx, [NO_DELETE])
-    await mountDynamic(ctx, HOSTILE_REGISTER, 'hrg', 'hostile-register')
-    expect(await callTool(ctx, 'delete_file')).toBe(true)
-    // 换名字这条路在本探针里没走通，但不是被网关拦的——是根作用域压根看不见它。
-    // ToolRuntime 按 agent 解析可见性（createExecution 里的 this.get(name, agent)），
-    // 而这里的 agent 是假对象。真 agent 作用域下可不可见，本轮未测。
-    const res = await ctx.tools.execute({
-      signal: new AbortController().signal,
-      callId: CallId('gate-y'), name: 'delete_file_2', arguments: { path: 'x.txt' }, agent,
-    })
-    expect(res.isError).toBe(true)
-    expect(res.content[0]?.type === 'text' && res.content[0].text).toContain('unknown tool')
-    expect(ctx.tools.schemas().map(x => x.name)).toEqual(['delete_file'])
-  })
-
-  it('论证10 白名单式网关在派发前拒绝，理由来自网关而非注册表', async () => {
-    const ALLOWLIST: Constraint = {
-      name: 'allowlist',
-      preTool: c => c.name === 'safe_tool'
-        ? { kind: 'allow' }
-        : { kind: 'deny', reason: `网关拒绝：工具「${c.name}」不在白名单里` },
-    }
-    const ctx = await boot()
-    installToolGate(ctx, [ALLOWLIST])
-    await mountDynamic(ctx, HOSTILE_REGISTER, 'hrg', 'hostile-register')
-    for (const name of ['delete_file', 'delete_file_2', '随便什么没见过的名字']) {
-      const res = await ctx.tools.execute({
-        signal: new AbortController().signal,
-        callId: CallId('gate-z'), name, arguments: { path: 'x.txt' }, agent,
-      })
-      expect(res.isError, name).toBe(true)
-      // 关键：理由来自网关，说明它在派发之前就拦下了，没走到注册表查找。
-      expect(res.content[0]?.type === 'text' && res.content[0].text, name).toContain('不在白名单里')
-    }
-  })
-
   it('论证11 沙箱拿不到别的工具的 execute，也拿不到真 ToolRuntime', async () => {
     const ctx = await boot()
     const lines: string[] = []
@@ -290,5 +259,95 @@ describe('判决聚合层 · 攻它', () => {
     const joined = lines.join('\n')
     expect(joined).toContain('拿到 execute 了吗：否')
     expect(joined).toContain('上面有 execute 吗：否')
+  })
+})
+
+// ── 论证9 的补测：换成真 agent，看插件注册的工具在 agent 作用域下可不可见 ──
+// ToolRuntime 按 agent 解析可见性，前面用假 agent 对象测不出来。这里搭一个真的：
+// AgentRegistry + AgentLoop，LLM 接假 adapter（不调模型、不花钱、不需要 API key）。
+
+class SilentAdapter extends LlmAdapter {
+  // eslint-disable-next-line require-yield
+  async * stream(): AsyncIterable<StreamChunk> {
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+async function bootWithRealAgent(): Promise<{ ctx: Context; real: Agent }> {
+  const ctx = new Context()
+  await ctx.plugin(Timer)
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(DynamicCordisRunner, {})
+  ctx.llm.registerAdapter(['fake'], new SilentAdapter())
+  ctx.tools.register(DELETE_TOOL)
+  const handle = await ctx.agents.create({
+    sessionId: SessionId('gate-agent'),
+    agentOptions: { provider: 'fake', model: 'fake' },
+    setup: async () => {},
+  })
+  return { ctx, real: handle.agent }
+}
+
+/** 用真 agent 的身份挂一个动态插件。 */
+async function mountForAgent(ctx: Context, real: Agent, src: string, prefix: string, name: string): Promise<boolean> {
+  const { pluginId, packageId } = ctx.dynamicCordisRunner.define({
+    sessionId: real.id as never,
+    plugin: { kind: 'new', idPrefix: prefix },
+    name, purpose: name,
+    code: { host: src },
+  })
+  const receipt = await ctx.dynamicCordisRunner.run(real, pluginId, packageId, 'run')
+  return receipt.ok
+}
+
+async function callAs(ctx: Context, real: Agent, name: string): Promise<{ isError: boolean; text: string }> {
+  const res = await ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: CallId(`real-${name}`), name, arguments: { path: 'x.txt' }, agent: real,
+  })
+  const first = res.content[0]
+  return { isError: res.isError, text: first?.type === 'text' ? first.text : '' }
+}
+
+describe('判决聚合层 · 真 agent 作用域下的换名字缺口', () => {
+  it('论证9 真 agent 看得见并调得动自己插件注册的工具', async () => {
+    const { ctx, real } = await bootWithRealAgent()
+    expect(await mountForAgent(ctx, real, HOSTILE_REGISTER, 'hrg', 'hostile-register')).toBe(true)
+    // agent 作用域和根作用域都看得见——注册成功之后没有作用域隔离可依赖。
+    expect(ctx.tools.schemas(real as never).map(x => x.name)).toContain('delete_file_2')
+    expect(ctx.tools.schemas().map(x => x.name)).toContain('delete_file_2')
+    const r = await callAs(ctx, real, 'delete_file_2')
+    expect(r.isError).toBe(false)
+    expect(r.text).toBe('deleted:x.txt')
+  })
+
+  it('论证10 按名判定被换名字绕过；白名单挡得住', async () => {
+    // 按名判定：缺口成立
+    const a = await bootWithRealAgent()
+    installToolGate(a.ctx, [NO_DELETE])
+    await mountForAgent(a.ctx, a.real, HOSTILE_REGISTER, 'hrg', 'hostile-register')
+    expect((await callAs(a.ctx, a.real, 'delete_file')).isError).toBe(true)   // 老名字拦得住
+    const byName = await callAs(a.ctx, a.real, 'delete_file_2')
+    expect(byName.isError).toBe(false)                                        // ← 换个名字就绕过去了
+    expect(byName.text).toBe('deleted:x.txt')
+
+    // 白名单
+    const ALLOWLIST: Constraint = {
+      name: 'allowlist',
+      preTool: c => c.name === 'safe_tool'
+        ? { kind: 'allow' }
+        : { kind: 'deny', reason: `网关拒绝：工具「${c.name}」不在白名单里` },
+    }
+    const b = await bootWithRealAgent()
+    installToolGate(b.ctx, [ALLOWLIST])
+    await mountForAgent(b.ctx, b.real, HOSTILE_REGISTER, 'hrg', 'hostile-register')
+    const byList = await callAs(b.ctx, b.real, 'delete_file_2')
+    expect(byList.isError).toBe(true)
+    expect(byList.text).toContain('不在白名单里')   // 白名单拦得住
   })
 })
