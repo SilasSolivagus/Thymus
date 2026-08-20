@@ -1,5 +1,8 @@
 # 交接：校园网客服 agent（新会话从这里接）
 
+> **先读 `STATUS.md`。** 15 份 FINDINGS 里有若干条已被后来的实验推翻或降级，
+> STATUS 里有完整的撤回清单和可直接照做的架构结论。本文件是流程与下一步。
+
 分支 `spike/layer-feasibility`。DEEPSEEK_API_KEY 由 `.env.local` 自动加载（勿入库）。
 重活（构建、真模型调用）派子 agent 后台跑。
 
