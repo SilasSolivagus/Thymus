@@ -1,0 +1,110 @@
+[
+  {
+    "arm": "base",
+    "tag": "r1",
+    "len": 11562,
+    "callsModel": true,
+    "devMs": 362022,
+    "usage": {
+      "input": 60650,
+      "output": 101660,
+      "reasoning": 93428,
+      "cacheRead": 43520
+    },
+    "pub": 9,
+    "held": 6,
+    "held2": 6,
+    "held2NoCall": 0,
+    "submitted": true
+  },
+  {
+    "arm": "base",
+    "tag": "r2",
+    "len": 8554,
+    "callsModel": true,
+    "devMs": 408722,
+    "usage": {
+      "input": 482,
+      "output": 116860,
+      "reasoning": 104662,
+      "cacheRead": 224512
+    },
+    "pub": 9,
+    "held": 5,
+    "held2": 6,
+    "held2NoCall": 0,
+    "submitted": true
+  },
+  {
+    "arm": "base",
+    "tag": "r3",
+    "len": 10692,
+    "callsModel": true,
+    "devMs": 325945,
+    "usage": {
+      "input": 77936,
+      "output": 91974,
+      "reasoning": 84446,
+      "cacheRead": 16128
+    },
+    "pub": 9,
+    "held": 6,
+    "held2": 6,
+    "held2NoCall": 0,
+    "submitted": true
+  },
+  {
+    "arm": "jspace",
+    "tag": "r1",
+    "len": 15002,
+    "callsModel": true,
+    "devMs": 506500,
+    "usage": {
+      "input": 126384,
+      "output": 148152,
+      "reasoning": 126254,
+      "cacheRead": 168704
+    },
+    "pub": 9,
+    "held": 2,
+    "held2": 1,
+    "held2NoCall": 6,
+    "submitted": true
+  },
+  {
+    "arm": "jspace",
+    "tag": "r2",
+    "len": 13434,
+    "callsModel": true,
+    "devMs": 761070,
+    "usage": {
+      "input": 110766,
+      "output": 211380,
+      "reasoning": 199266,
+      "cacheRead": 117504
+    },
+    "pub": 9,
+    "held": 3,
+    "held2": 2,
+    "held2NoCall": 3,
+    "submitted": true
+  },
+  {
+    "arm": "jspace",
+    "tag": "r3",
+    "len": 8130,
+    "callsModel": true,
+    "devMs": 487688,
+    "usage": {
+      "input": 43818,
+      "output": 130982,
+      "reasoning": 124008,
+      "cacheRead": 104704
+    },
+    "pub": 9,
+    "held": 2,
+    "held2": 2,
+    "held2NoCall": 4,
+    "submitted": true
+  }
+]
