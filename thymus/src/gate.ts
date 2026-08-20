@@ -27,6 +27,17 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 /** 一条判决。没有 `ask`——这一层只做确定性裁决，要人介入是上层的事。 */
 export type Verdict = { kind: 'allow' } | { kind: 'deny'; reason: string }
 
+/** 一条约束多久不给判决就按 deny 计。挂住的约束不能变成放行。 */
+export const DEFAULT_VERDICT_TIMEOUT_MS = 10_000
+
+/** 判决形状校验：不是这两种形状的一律不认。 */
+function isVerdict(v: unknown): v is Verdict {
+  if (typeof v !== 'object' || v === null) return false
+  const kind = (v as { kind?: unknown }).kind
+  if (kind === 'allow') return true
+  return kind === 'deny' && typeof (v as { reason?: unknown }).reason === 'string'
+}
+
 /** 一次工具调用里裁决者看得到的部分。 */
 export interface ToolCall {
   name: string
@@ -43,22 +54,36 @@ export interface Constraint {
 /**
  * 聚合规则：任一 deny 即拒绝，与顺序无关；全 allow 才放行。
  * 判决并行求取，一条约束抛错按 deny 计——裁决者自己坏掉不能变成放行。
+ * 三种「约束自己坏掉」的情形都按 deny 计，不能变成放行：抛错、超时、返回非法判决。
+ * 约束并行求取，所以延迟取最慢的一条，不是累加。
+ *
  * @param constraints - 参与本次裁决的约束。
  * @param ask - 向单条约束取判决；返回 undefined 表示该约束不管这个通道。
+ * @param timeoutMs - 单条约束的判决超时，缺省 {@link DEFAULT_VERDICT_TIMEOUT_MS}。
  * @returns 第一条 deny（按约束声明顺序取，只影响报错文案），或 allow。
  */
-export async function adjudicate<T>(
+export async function adjudicate(
   constraints: readonly Constraint[],
   ask: (c: Constraint) => (Verdict | Promise<Verdict>) | undefined,
-  _subject?: T,
+  timeoutMs: number = DEFAULT_VERDICT_TIMEOUT_MS,
 ): Promise<Verdict> {
   const verdicts = await Promise.all(constraints.map(async (c): Promise<Verdict> => {
     // ask(c) 本身要放进 try：同步抛错的约束不能逃过裁决直接冒到调用方。
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const v = ask(c)
-      return v === undefined ? { kind: 'allow' } : await v
+      if (v === undefined) return { kind: 'allow' }
+      const settled = await Promise.race([
+        Promise.resolve(v),
+        new Promise<Verdict>(resolve => {
+          timer = setTimeout(() => resolve({ kind: 'deny', reason: `约束「${c.name}」判决超时（${timeoutMs}ms）` }), timeoutMs)
+        }),
+      ])
+      return isVerdict(settled) ? settled : { kind: 'deny', reason: `约束「${c.name}」返回了非法判决` }
     } catch (e) {
       return { kind: 'deny', reason: `约束「${c.name}」裁决失败：${e instanceof Error ? e.message : String(e)}` }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
     }
   }))
   return verdicts.find((v): v is { kind: 'deny'; reason: string } => v.kind === 'deny') ?? { kind: 'allow' }
@@ -75,13 +100,16 @@ interface ToolResult {
  * 必须在任何被约束方的代码加载之前装——和 seccomp 一样，先装过滤器再放行不受信任的代码。
  * @param ctx - 宿主 context。
  * @param constraints - 参与裁决的约束。
+ * @param timeoutMs - 单条约束的判决超时，缺省 {@link DEFAULT_VERDICT_TIMEOUT_MS}。
  */
-export function installToolGate(ctx: Context, constraints: readonly Constraint[]): void {
+export function installToolGate(
+  ctx: Context, constraints: readonly Constraint[], timeoutMs?: number,
+): void {
   const runtime = ctx.tools as unknown as { execute: (call: never) => Promise<ToolResult> }
   const inner = runtime.execute.bind(runtime)
   runtime.execute = async (call: never): Promise<ToolResult> => {
     const { name, arguments: args } = call as unknown as ToolCall
-    const verdict = await adjudicate(constraints, c => c.preTool?.({ name, arguments: args }))
+    const verdict = await adjudicate(constraints, c => c.preTool?.({ name, arguments: args }), timeoutMs)
     if (verdict.kind === 'deny') return { content: [{ type: 'text', text: verdict.reason }], isError: true }
     return inner(call)
   }
@@ -104,15 +132,16 @@ function sayUpstream(text: string): AsyncIterable<StreamChunk> {
  * @param ctx - 宿主 context。
  * @param text - 模型欲说出的原文。
  * @param constraints - 参与裁决的约束。
+ * @param timeoutMs - 单条约束的判决超时，缺省 {@link DEFAULT_VERDICT_TIMEOUT_MS}。
  * @returns 裁决结果与装配后的文本（deny 时文本仍返回，供归因用）。
  */
 export async function gateSay(
-  ctx: Context, text: string, constraints: readonly Constraint[],
+  ctx: Context, text: string, constraints: readonly Constraint[], timeoutMs?: number,
 ): Promise<{ verdict: Verdict; assembled: string }> {
   const options: GenerateOptions = { provider: 'gate', model: 'gate', messages: [] }
   const stream = ctx.waterfall(ctx as never, 'llm/stream', options, () => sayUpstream(text))
   const assembler = new BlockAssembler()
   for await (const chunk of stream) assembler.push(chunk)
   const assembled = assembler.blocks().filter(b => b.type === 'text').map(b => b.text).join('')
-  return { verdict: await adjudicate(constraints, c => c.say?.(assembled)), assembled }
+  return { verdict: await adjudicate(constraints, c => c.say?.(assembled), timeoutMs), assembled }
 }

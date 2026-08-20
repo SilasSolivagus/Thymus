@@ -459,3 +459,55 @@ describe('判决聚合层 · 说话通道的抢位', () => {
     expect(judged.verdict.kind).toBe('deny')        // 网关照样抓到
   })
 })
+
+// ── 网关在真实条件下的代价与失败路径 ──
+// 发现 13 把「语义判定放网关里」变成了推荐架构，那这条路的代价和失败行为就得先摸清楚。
+
+const slowConstraint = (name: string, ms: number, verdict: 'allow' | 'deny' = 'allow'): Constraint => ({
+  name,
+  say: async () => {
+    await new Promise(r => setTimeout(r, ms))
+    return verdict === 'deny' ? { kind: 'deny', reason: `${name} 拒绝` } : { kind: 'allow' }
+  },
+})
+
+describe('判决聚合层 · 代价与失败路径', () => {
+  it('论证20 多条约束并行求取，不是串行——延迟取最慢的一条而非累加', async () => {
+    const ctx = await boot()
+    const one = Date.now()
+    await gateSay(ctx, '您好', [slowConstraint('a', 120)])
+    const oneMs = Date.now() - one
+    const four = Date.now()
+    await gateSay(ctx, '您好', [
+      slowConstraint('a', 120), slowConstraint('b', 120),
+      slowConstraint('c', 120), slowConstraint('d', 120),
+    ])
+    const fourMs = Date.now() - four
+    // 串行的话四条应当接近 480ms；并行的话接近 120ms。留足余量避免机器抖动。
+    expect(oneMs).toBeGreaterThanOrEqual(100)
+    expect(fourMs).toBeLessThan(oneMs * 2)
+  })
+
+  it('论证21 一条约束挂住：超时按 deny 计，不会拖住整个网关', async () => {
+    const ctx = await boot()
+    const hang: Constraint = { name: 'hang', say: () => new Promise<never>(() => { /* 永不 settle */ }) }
+    const t0 = Date.now()
+    const r = await gateSay(ctx, '您好', [hang], 200)
+    expect(Date.now() - t0).toBeLessThan(1000)
+    expect(r.verdict.kind).toBe('deny')
+    expect(r.verdict.kind === 'deny' && r.verdict.reason).toContain('判决超时')
+  })
+
+  it('论证21b 没超时的慢约束正常放行，超时不是一刀切', async () => {
+    const ctx = await boot()
+    const r = await gateSay(ctx, '您好', [slowConstraint('slow', 80)], 500)
+    expect(r.verdict.kind).toBe('allow')
+  })
+
+  it('论证22 约束返回非法判决，按 deny 计而不是当成放行（首版是 allow，实测抓出来的）', async () => {
+    const ctx = await boot()
+    const bogus = { name: 'bogus', say: () => ({ kind: '随便什么' }) } as unknown as Constraint
+    const r = await gateSay(ctx, '您好', [bogus])
+    expect(r.verdict.kind).toBe('deny')
+  })
+})
