@@ -53,24 +53,23 @@
 模型再强它也不会自己变好；语义判定是换机制，模型变强它就变准、变便宜、变快。
 今天两条路差 967ms 和几十行代码。
 
-## 依赖状态（2026-08-19 核对）
+## 依赖状态
 
-vendor 的 dsh 是 `0.1.0-rc.7`（`99f6f02`）。上游已发 `dsh-v0.1.0-rc.8`（`141eb6fef`），
-中间 536 个 commit。按文件比对我们全部结论压在上面的那几处：
+vendor 的 dsh 已升到 `0.1.0-rc.8`（`141eb6fe`），submodule url 改指上游
+`deepseek-ai/deepseek-harness`（原 fork 相对上游零自带 commit，定制在
+`../../probes/scope-fix.patch` 里由 run.sh 运行时打）。
 
-```
-未变  cordis-host-runner/src/guard.ts    ← 沙箱 façade，policy 层可达性压在它上面
-未变  cordis-host-runner/src/index.ts    ← 动态插件运行时
-未变  llm/llm/src/index.ts               ← llm/stream waterfall、ctx.llm.stream
-未变  core/tools/src/index.ts
-已变  llm/llm/src/assembler.ts           ← 只加 interruptedBlocks()，block-end 权威两行原封不动
-已变  core/session/src/types.ts          ← TurnEndReasonMap 六个变体一个没动
-```
+rc.7→rc.8 共 536 个 commit，逐文件核对过：`cordis-host-runner`（含 guard.ts）、
+`llm/llm/src/index.ts`、`core/tools/src/index.ts` 未变；`assembler.ts` 只加
+`interruptedBlocks()`，block-end 权威两行未动；`TurnEndReasonMap` 六个变体未动；
+`agent-loop/src/agent.ts` 改了 33 行但没有一行碰 `turnEnds` / `turn/end` 赋值。
+**四份 FINDINGS 在 rc.8 上全部成立，不用重跑**（已实测：40 passed、空插件组基线
+24 条全过、probe-speech-guard 真模型跑通）。
 
-**四份 FINDINGS 在 rc.8 上仍然成立，不用重跑。** 但 agent-loop 的取消/收尾改了
-（「取消的流要 finalize 已交付前缀」「失败的尝试不要 finalize」），那正是 `say()`
-空转问题所在的地带——升级后 TRANSPORT 失败在事件里的表现可能不同，`src/turn.ts`
-的判断要重新验。升级不急。
+一处行为差异要记住：**`llm/retry-policy.ts` 的 `DEFAULT_MAX_RETRIES` 从 2 改成 5**。
+Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败要重试 5 次才会冒成
+`turn/end` 的 `{kind:'error'}`——发现 03 二记的空转现象出现频率会下降，失败路径
+单轮耗时上升。**要复现那个现象，需显式把 `retryPolicy.maxRetries` 配回 2。**
 
 ## 下一步
 
