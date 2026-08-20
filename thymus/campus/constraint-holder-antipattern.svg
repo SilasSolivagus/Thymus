@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 760" width="960" height="760">
+  <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', 'SimHei', sans-serif; }
+  </style>
+  <defs>
+    <marker id="ar-red" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/>
+    </marker>
+    <marker id="ar-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#16a34a"/>
+    </marker>
+  </defs>
+  <rect width="960" height="760" fill="#ffffff"/>
+  <text x="40" y="44" font-size="20" font-weight="600" fill="#111827">「规矩交给被管的人自己拿着」——三次实测，三次都失效</text>
+  <text x="40" y="68" font-size="13" fill="#6b7280">我说的「已经实测过会失效的那种」就是这个形态。dashi 看板是第三例。</text>
+  <rect x="40" y="88" width="880" height="56" rx="8" fill="#fef2f2" stroke="#fecaca" stroke-width="1.5"/>
+  <text x="64" y="114" font-size="15" font-weight="600" fill="#991b1b">规矩存在于「被管的一方能读到、也能动到」的地方</text>
+  <text x="64" y="134" font-size="13" fill="#b91c1c">那它就不是规矩，是自愿。下面三例摆法不同，毛病同一个。</text>
+  <rect x="40" y="166" width="280" height="250" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="40" y="166" width="280" height="58" rx="8" fill="#fef2f2"/>
+  <rect x="40" y="216" width="280" height="8" fill="#fef2f2"/>
+  <text x="56" y="192" font-size="15" font-weight="600" fill="#111827">① dsh 动态插件</text>
+  <text x="56" y="213" font-size="12.5" font-weight="600" fill="#dc2626">实测：卸得掉</text>
+  <line x1="40" y1="224" x2="320" y2="224" stroke="#d1d5db" stroke-width="1"/>
+  <text x="56" y="250" font-size="11.5" fill="#9ca3af">摆法</text>
+  <text x="56" y="272" font-size="13" fill="#374151">约束插件和 agent 的插件</text>
+  <text x="56" y="294" font-size="13" fill="#374151">都在同一个注册表里</text>
+  <line x1="56" y1="312" x2="304" y2="312" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="56" y="334" font-size="11.5" fill="#9ca3af">实测结果</text>
+  <text x="56" y="356" font-size="13" fill="#111827">agent 调 stop() 卸掉约束</text>
+  <text x="56" y="378" font-size="13" fill="#111827">返回 {"ok":true}</text>
+  <text x="56" y="400" font-size="13" fill="#111827">被拦的调用当场放行</text>
+  <rect x="340" y="166" width="280" height="250" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="340" y="166" width="280" height="58" rx="8" fill="#fef2f2"/>
+  <rect x="340" y="216" width="280" height="8" fill="#fef2f2"/>
+  <text x="356" y="192" font-size="15" font-weight="600" fill="#111827">② 事件检查链</text>
+  <text x="356" y="213" font-size="12.5" font-weight="600" fill="#dc2626">实测：架得空</text>
+  <line x1="340" y1="224" x2="620" y2="224" stroke="#d1d5db" stroke-width="1"/>
+  <text x="356" y="250" font-size="11.5" fill="#9ca3af">摆法</text>
+  <text x="356" y="272" font-size="13" fill="#374151">约束和 agent 的检查</text>
+  <text x="356" y="294" font-size="13" fill="#374151">排在同一条队列里</text>
+  <line x1="356" y1="312" x2="604" y2="312" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="356" y="334" font-size="11.5" fill="#9ca3af">实测结果</text>
+  <text x="356" y="356" font-size="13" fill="#111827">agent 抢在前面答「放行」</text>
+  <text x="356" y="378" font-size="13" fill="#111827">短路，后面不再执行</text>
+  <text x="356" y="400" font-size="13" fill="#111827">约束根本没跑到</text>
+  <rect x="640" y="166" width="280" height="250" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="640" y="166" width="280" height="58" rx="8" fill="#fef2f2"/>
+  <rect x="640" y="216" width="280" height="8" fill="#fef2f2"/>
+  <text x="656" y="192" font-size="15" font-weight="600" fill="#111827">③ dashi 看板</text>
+  <text x="656" y="213" font-size="12.5" font-weight="600" fill="#dc2626">实测：自己盖章</text>
+  <line x1="640" y1="224" x2="920" y2="224" stroke="#d1d5db" stroke-width="1"/>
+  <text x="656" y="250" font-size="11.5" fill="#9ca3af">摆法</text>
+  <text x="656" y="272" font-size="13" fill="#374151">「完成要人验收」只写在</text>
+  <text x="656" y="294" font-size="13" fill="#374151">给 AI 看的说明书里</text>
+  <line x1="656" y1="312" x2="904" y2="312" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="656" y="334" font-size="11.5" fill="#9ca3af">实测结果</text>
+  <text x="656" y="356" font-size="13" fill="#111827">agent 直接 todo → done</text>
+  <text x="656" y="378" font-size="13" fill="#111827">HTTP 200，跳过待复核</text>
+  <text x="656" y="400" font-size="13" fill="#111827">身份靠请求头自称</text>
+  <line x1="180" y1="144" x2="180" y2="162" stroke="#dc2626" stroke-width="1.5" marker-end="url(#ar-red)"/>
+  <line x1="480" y1="144" x2="480" y2="162" stroke="#dc2626" stroke-width="1.5" marker-end="url(#ar-red)"/>
+  <line x1="780" y1="144" x2="780" y2="162" stroke="#dc2626" stroke-width="1.5" marker-end="url(#ar-red)"/>
+  <rect x="40" y="444" width="880" height="66" rx="8" fill="#f9fafb" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="64" y="470" font-size="11.5" fill="#9ca3af">三种形式，一个毛病</text>
+  <text x="64" y="494" font-size="14.5" fill="#111827">关卡和被关的人在同一层：一个能把关卡卸掉，一个能插到关卡前面，一个能自己盖章。</text>
+  <line x1="480" y1="510" x2="480" y2="534" stroke="#16a34a" stroke-width="1.5" marker-end="url(#ar-green)"/>
+  <rect x="40" y="538" width="280" height="152" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="56" y="568" font-size="15" font-weight="600" fill="#14532d">挪出注册表</text>
+  <line x1="56" y1="580" x2="304" y2="580" stroke="#bbf7d0" stroke-width="1"/>
+  <text x="56" y="604" font-size="13" fill="#166534">约束不进动态注册表</text>
+  <text x="56" y="626" font-size="13" fill="#166534">它列不到，也卸不掉</text>
+  <rect x="56" y="652" width="72" height="22" rx="4" fill="#dcfce7" stroke="#86efac" stroke-width="1"/>
+  <text x="66" y="667" font-size="12" font-weight="600" fill="#15803d">实测通过</text>
+  <rect x="340" y="538" width="280" height="152" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="356" y="568" font-size="15" font-weight="600" fill="#14532d">关卡移到链外</text>
+  <line x1="356" y1="580" x2="604" y2="580" stroke="#bbf7d0" stroke-width="1"/>
+  <text x="356" y="604" font-size="13" fill="#166534">包住调用入口，先裁决</text>
+  <text x="356" y="626" font-size="13" fill="#166534">再派发；谁先谁后都一样</text>
+  <rect x="356" y="652" width="72" height="22" rx="4" fill="#dcfce7" stroke="#86efac" stroke-width="1"/>
+  <text x="366" y="667" font-size="12" font-weight="600" fill="#15803d">实测通过</text>
+  <rect x="640" y="538" width="280" height="152" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="656" y="568" font-size="15" font-weight="600" fill="#14532d">钥匙不给被管的</text>
+  <line x1="656" y1="580" x2="904" y2="580" stroke="#bbf7d0" stroke-width="1"/>
+  <text x="656" y="604" font-size="13" fill="#166534">白名单：没登记一律拒</text>
+  <text x="656" y="626" font-size="13" fill="#166534">发钥匙的不是被管的人（设计）</text>
+  <rect x="656" y="652" width="102" height="22" rx="4" fill="#dcfce7" stroke="#86efac" stroke-width="1"/>
+  <text x="666" y="667" font-size="12" font-weight="600" fill="#15803d">白名单已实测</text>
+  <line x1="40" y1="722" x2="70" y2="722" stroke="#dc2626" stroke-width="1.5" marker-end="url(#ar-red)"/>
+  <text x="78" y="726" font-size="12" fill="#6b7280">失效路径（已实测）</text>
+  <line x1="240" y1="722" x2="270" y2="722" stroke="#16a34a" stroke-width="1.5" marker-end="url(#ar-green)"/>
+  <text x="278" y="726" font-size="12" fill="#6b7280">有效做法（已实测）</text>
+  <text x="920" y="726" font-size="11.5" fill="#9ca3af" text-anchor="end">Thymus 发现 08 / 09 / 10 · dashi 为本地起服务实跑验证</text>
+</svg>

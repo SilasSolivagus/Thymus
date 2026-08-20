@@ -153,20 +153,31 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 偏差写在 FINDINGS 里：只喂了 16KB 入口文件，9 个模块按需加载没实现，测的是它
 能力的下限。要推翻这个结论得先把模块加载实现出来重测，在那之前没有理由引。
 
-### dashi-taskboard —— 记下来，暂不引
+### dashi-taskboard —— 已实跑验证，不引入
 
 `chuspeeism/dashi-taskboard`。本地优先的 issue 看板，状态流
-todo → in_progress → in_review → done，带 CLI 与一个教 Codex 管任务的 skill，
-能把「哪次对话动了哪个 issue」记下来。
+todo → in_progress → in_review → done，带 CLI 与一个教 Codex 管任务的 skill。
 
-**不作为评估依据。** 它与轨迹回答的是同一类问题（发生了什么），不产生「这一版对不对」
-的信号。两个归因工具拼起来还是归因，评估的短板没补。
+**它的复核关卡是提示词，不是机制。实跑验证过，不是读代码推的**（本地起服务，走 HTTP API）：
 
-**真用得上的位置是人工复核那一环**：`in_review` 这个状态本身就是双人复核队列，
-可以装两样东西——待复核的插件版本（agent 提交 → 人看过才 done，评测结果挂 comment），
-以及待标注的线上话术（语义判定标出来的句子进队列，人抽检校准，这是「线上流量长成
-题库」缺的那道工序）。
+1. 以 agent 身份（`X-Taskboard-Client: taskctl`）建 `todo` 任务 → 成功
+2. 同一身份直接 `PATCH status=done` → **`HTTP 200`**，跳过 `in_progress` 与 `in_review`，
+   全程无人参与
+3. 去掉 `taskctl` 头再改一次 → 同样 200，审计表把这次记成 `user | 本地用户`
 
-暂不引的理由：它是给 Codex 做的，接到 dsh 上是实打实的工作量；人工复核那一环目前
-还不是瓶颈（「改坏合规话术」这一维都还没测全）；而且按我们自己的规矩，引之前要先
-实测——J-Space 正在演示这条规矩为什么不能省。
+代码侧对应：服务端唯一的状态校验是 `isTaskStatus()`（集合成员检查），全库无流转校验；
+「done 只在用户验收后」这句话只存在于 `skills/manage-taskboard/SKILL.md` 第 32 行。
+身份由 `actorFromRequest()` 按请求头判定，可自称。
+
+审计**是记的**（`task_activities` 表两条都在，含 `status: todo→done` 且标注 agent），
+但身份自称使它只能当线索，不能当凭据。
+
+**不作为评估依据**：它与轨迹回答同一类问题（发生了什么），不产生「这一版对不对」的信号。
+
+**真用得上的位置是人工复核那一环，但强制力得我们自己加**：不把 taskctl 给业务 agent，
+它只能建 issue 和推到 `in_review`，`done` 只从 UI 走人手。锁是我们加的，不是它给的。
+
+暂不引：接到 dsh 上有实打实工作量；人工复核那一环目前还不是瓶颈。
+
+配图 `constraint-holder-antipattern.svg` / `.png`：把 dsh 插件卸载、事件链架空、
+dashi 自己盖章三例并排，说明「规矩交给被管的一方自己拿着」这个失效形态。
