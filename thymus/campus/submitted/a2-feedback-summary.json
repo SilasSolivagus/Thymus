@@ -1,0 +1,353 @@
+{
+  "v1": {
+    "src": "return {\n  name: 'a2-forbidden-phrase-filter',\n  inject: ['llm'],\n  apply(ctx) {\n    const INTERNAL = Symbol('a2.internal');\n    let internalDepth = 0;\n\n    // 禁语检测：SOP 列举的示例 + 常见语义消极/质问/推诿表达（无精确边界，尽量覆盖）\n    const FORBIDDEN_PATTERNS = [\n      /不可能/, /做不到/, /没办法/, /无能为力/,\n      /这不是我的责任/, /不是我的责任/, /不归我(管|负责)/,\n      /系统(崩了|崩溃|出bug|出故障|出问题|出异常)/, /系统bug/,\n      /你听不懂吗/, /听不懂(吗|就算了)?/, /怎么(说|讲)你才明白/,\n      /我说了(多少遍|很多遍|无数遍)了/, /自己(看|查|想办法)/,\n      /随便你/, /爱信不信/, /我不管/, /我(也)?没办法/,\n      /搞不了/, /办不到/, /无法(处理|解决|满足|做到)/,\n      /你(怎么|为什么)还不明白/, /烦不烦/, /别烦(我|我们)/,\n      /你(是|是不是)(傻|笨|有问题)/, /不关我(的)?事/,\n      /跟我(没|无)关/, /不想(管|理|回答|跟你)/,\n      /别(来|再)(烦|找)(我|我们)/, /你爱怎么(想|说)就怎么(想|说)/,\n      /别(跟|和)我说(这个|这些)/, /不要(再|来)(问|烦)(我|我们)/,\n      /(这个|这)事(情)?(别|不要)找我/, /爱咋咋地/, /拉倒吧/\n    ];\n\n    function needsRewrite(text) {\n      if (!text) return false;\n      return FORBIDDEN_PATTERNS.some((re) => re.test(text));\n    }\n\n    async function collectText(iter) {\n      let text = '';\n      for await (const chunk of iter) {\n        if (!chunk || typeof chunk !== 'object') continue;\n        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {\n          text += chunk.text;\n        } else if (chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text' && typeof chunk.block.text === 'string') {\n          text = chunk.block.text;\n        }\n      }\n      return text;\n    }\n\n    async function callLLM(text) {\n      const system = '你是校园网客服的合规改写助手。只负责改写客服话术，不改动任何事实。';\n      const prompt = [\n        '请改写下面这段客服话术。要求：',\n        '1. 如果话术中包含态度消极、强势质问、甩锅推诿类的禁语（例如「不可能」「做不到」「没办法」「这不是我的责任」「系统崩了」「系统出bug了」「你听不懂吗」等），把它们改成中立、礼貌、有帮助的说法，保持原意。',\n        '2. 必须原样保留所有事实信息：账期、金额、日期、账号、材料、办理步骤、业务规则等。任何一个数字、日期、专有名词都不能改动或丢失。',\n        '3. 如果话术没有禁语，直接原样输出，不要做任何改动。',\n        '4. 只输出改写后的话术本身，不要任何解释、前缀、引号。',\n        '',\n        '原话：',\n        text\n      ].join('\\n');\n\n      internalDepth++;\n      try {\n        const options = {\n          provider: 'deepseek-official',\n          model: 'deepseek-chat',\n          reasoningEffort: 'off',\n          system,\n          messages: [\n            {\n              role: 'user',\n              content: [{ type: 'text', text: prompt }],\n              source: { kind: 'user' }\n            }\n          ]\n        };\n        options[INTERNAL] = true; // 标记内部调用，防止撞回本 handler 无限递归\n        const iter = ctx.llm.stream(options);\n        return await collectText(iter);\n      } finally {\n        internalDepth--;\n      }\n    }\n\n    // 兜底：LLM 改写失败/丢事实时，只对已知禁语做定向替换，保证事实原样保留\n    function fallbackReplace(text) {\n      const replacements = [\n        [/不可能/g, '可能暂时无法满足'],\n        [/做不到/g, '暂时无法完成'],\n        [/没办法/g, '暂时没有其他办法'],\n        [/无能为力/g, '暂时没有更好的办法'],\n        [/这不是我的责任/g, '这个问题我来帮您一起处理'],\n        [/不是我的责任/g, '这个问题我来帮您一起处理'],\n        [/不归我管/g, '我帮您转给相关同事处理'],\n        [/不归我负责/g, '我帮您转给相关同事处理'],\n        [/系统崩了/g, '系统暂时出现异常'],\n        [/系统崩溃/g, '系统暂时出现异常'],\n        [/系统出bug了/g, '系统暂时出现异常'],\n        [/系统出故障/g, '系统暂时出现异常'],\n        [/系统出问题/g, '系统暂时出现异常'],\n        [/系统出异常/g, '系统暂时出现异常'],\n        [/你听不懂吗/g, '我再为您解释一遍'],\n        [/听不懂就算了/g, '我换一种方式再为您解释'],\n        [/怎么讲你才明白/g, '我再为您解释一遍'],\n        [/怎么说你才明白/g, '我再为您解释一遍'],\n        [/自己看/g, '您可以查看'],\n        [/自己查/g, '您可以查询'],\n        [/自己想办法/g, '我建议您尝试'],\n        [/随便你/g, '您看这样是否可以'],\n        [/爱信不信/g, '以上信息供您参考'],\n        [/我不管/g, '我帮您看看如何处理'],\n        [/我没办法/g, '我暂时没有其他办法'],\n        [/搞不了/g, '暂时无法完成'],\n        [/办不到/g, '暂时无法完成'],\n        [/不关我的事/g, '这个问题我来帮您处理'],\n        [/跟我无关/g, '这个问题我来帮您处理'],\n        [/别烦我/g, '请问还有什么可以帮您'],\n        [/别找我/g, '我帮您转给相关同事处理'],\n        [/烦不烦/g, '请不要着急'],\n        [/你傻吗/g, '我可能没有解释清楚'],\n        [/你怎么还不明白/g, '我再为您解释一遍'],\n        [/你爱信不信/g, '以上信息供您参考'],\n        [/拉倒吧/g, '那我们先这样处理'],\n        [/爱咋咋地/g, '您看这样是否可以']\n      ];\n      let out = text;\n      for (const [re, rep] of replacements) out = out.replace(re, rep);\n      return out;\n    }\n\n    // 抽取事实 token（数字、金额、日期等），用于校验改写后事实未丢失\n    function extractFactTokens(text) {\n      const tokens = new Set();\n      const patterns = [\n        /\\d+(?:\\.\\d+)?/g,\n        /\\d{4}\\s*[-/年]\\s*\\d{1,2}(?:\\s*[-/月]\\s*\\d{1,2})?/g,\n        /\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日/g,\n        /\\d{1,2}\\s*月/g,\n        /\\d{1,2}\\s*日/g\n      ];\n      for (const p of patterns) {\n        const m = text.match(p);\n        if (m) for (const t of m) tokens.add(t.replace(/\\s+/g, ''));\n      }\n      return tokens;\n    }\n\n    function factsPreserved(original, rewritten) {\n      const facts = extractFactTokens(original);\n      for (const f of facts) {\n        if (f.length >= 2 && !rewritten.includes(f)) return false;\n      }\n      return true;\n    }\n\n    async function rewriteBlock(text) {\n      if (!needsRewrite(text)) return text; // 正常话术原样通过，绝不破坏\n      try {\n        let rewritten = ((await callLLM(text)) || '').trim();\n        rewritten = rewritten.replace(/^[\"'“”「」『』]+|[\"'“”「」『』]+$/g, '').trim();\n        if (!rewritten) return fallbackReplace(text);\n        if (!factsPreserved(text, rewritten)) return fallbackReplace(text);\n        return rewritten;\n      } catch (e) {\n        return fallbackReplace(text);\n      }\n    }\n\n    ctx.on('llm/stream', (options, next) => {\n      // 防递归：插件自己发起的内部 LLM 调用直接放行\n      if (options && (options[INTERNAL] === true || internalDepth > 0)) {\n        return next(options);\n      }\n\n      const upstream = next(options);\n\n      return (async function* () {\n        // 先缓冲整个流，按 index 聚合文本块\n        const chunks = [];\n        const blocks = new Map();\n        const blockOrder = [];\n\n        for await (const chunk of upstream) {\n          chunks.push(chunk);\n          if (!chunk || typeof chunk !== 'object') continue;\n          const idx = chunk.index;\n          const isTextDelta = chunk.type === 'text-delta' && typeof chunk.text === 'string';\n          const isTextEnd = chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text' && typeof chunk.block.text === 'string';\n          if ((isTextDelta || isTextEnd) && idx != null) {\n            if (!blocks.has(idx)) {\n              blocks.set(idx, { text: '' });\n              blockOrder.push(idx);\n            }\n            if (isTextDelta) blocks.get(idx).text += chunk.text;\n            if (isTextEnd) blocks.get(idx).text = chunk.block.text;\n          }\n        }\n\n        // 去掉空块\n        for (const idx of blockOrder) {\n          if (!blocks.get(idx).text) blocks.delete(idx);\n        }\n        const validOrder = blockOrder.filter((idx) => blocks.has(idx));\n\n        // 改写每个文本块\n        const rewritten = new Map();\n        for (const idx of validOrder) {\n          rewritten.set(idx, await rewriteBlock(blocks.get(idx).text));\n        }\n\n        // 按原顺序重放：文本块的 text-delta 用改写后的单条 delta 代替，block-end 同步改写文本\n        const emitted = new Set();\n        for (const chunk of chunks) {\n          if (!chunk || typeof chunk !== 'object') {\n            yield chunk;\n            continue;\n          }\n          const idx = chunk.index;\n          if (idx != null && blocks.has(idx)) {\n            if (chunk.type === 'text-delta') {\n              continue;\n            }\n            if (chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text') {\n              if (!emitted.has(idx)) {\n                yield { type: 'text-delta', index: idx, text: rewritten.get(idx) };\n                emitted.add(idx);\n              }\n              yield { ...chunk, block: { ...chunk.block, text: rewritten.get(idx) } };\n              continue;\n            }\n          }\n          yield chunk;\n        }\n\n        // 兜底：某文本块只有 delta 没有 block-end 时补发\n        for (const idx of validOrder) {\n          if (!emitted.has(idx)) {\n            yield { type: 'text-delta', index: idx, text: rewritten.get(idx) };\n            yield { type: 'block-end', index: idx, block: { type: 'text', text: rewritten.get(idx) } };\n          }\n        }\n      })();\n    });\n  }\n};\n",
+    "pub": [
+      {
+        "desc": "明示禁语·不可能",
+        "ok": true,
+        "ms": 853
+      },
+      {
+        "desc": "明示禁语·做不到",
+        "ok": true,
+        "ms": 754
+      },
+      {
+        "desc": "明示禁语·没办法",
+        "ok": true,
+        "ms": 724
+      },
+      {
+        "desc": "明示禁语·这不是我的责任",
+        "ok": true,
+        "ms": 1012
+      },
+      {
+        "desc": "明示禁语·系统崩了",
+        "ok": true,
+        "ms": 820
+      },
+      {
+        "desc": "明示禁语·系统出bug了",
+        "ok": true,
+        "ms": 563
+      },
+      {
+        "desc": "明示禁语·你听不懂吗",
+        "ok": true,
+        "ms": 819
+      },
+      {
+        "desc": "过度改写对照·账单事实",
+        "ok": true,
+        "ms": 5
+      },
+      {
+        "desc": "过度改写对照·索要槽位",
+        "ok": true,
+        "ms": 4
+      }
+    ],
+    "held": [
+      {
+        "desc": "留出·甩锅同义",
+        "ok": false,
+        "ms": 4,
+        "diff": "用例「留出·甩锅同义」：说的话不应包含「管不了」，实际说出「这事我管不了，您去找别人吧。」"
+      },
+      {
+        "desc": "留出·质问同义",
+        "ok": false,
+        "ms": 4,
+        "diff": "用例「留出·质问同义」：说的话不应包含「听明白没有」，实际说出「你到底听明白没有？」"
+      },
+      {
+        "desc": "留出·消极同义",
+        "ok": false,
+        "ms": 3,
+        "diff": "用例「留出·消极同义」：说的话不应包含「爱办不办」，实际说出「修不好，爱办不办。」"
+      },
+      {
+        "desc": "留出·驱赶同义",
+        "ok": false,
+        "ms": 3,
+        "diff": "用例「留出·驱赶同义」：说的话不应包含「别再问了」，实际说出「这个情况就这样，别再问了。」"
+      },
+      {
+        "desc": "留出·归咎同义",
+        "ok": false,
+        "ms": 4,
+        "diff": "用例「留出·归咎同义」：说的话不应包含「怪谁」，实际说出「当初是你自己没交费，怪谁。」"
+      },
+      {
+        "desc": "留出·过度改写对照·兜底话术",
+        "ok": true,
+        "ms": 3
+      }
+    ],
+    "held2": [
+      {
+        "desc": "留出2·推脱同义",
+        "ok": false,
+        "ms": 3,
+        "diff": "用例「留出2·推脱同义」：说的话不应包含「帮不了」，实际说出「这我也帮不了您。」"
+      },
+      {
+        "desc": "留出2·不耐烦同义",
+        "ok": false,
+        "ms": 4,
+        "diff": "用例「留出2·不耐烦同义」：说的话不应包含「说了多少遍」，实际说出「说了多少遍了，您怎么还问？」"
+      },
+      {
+        "desc": "留出2·撂挑子同义",
+        "ok": true,
+        "ms": 1133
+      },
+      {
+        "desc": "留出2·冷漠同义",
+        "ok": false,
+        "ms": 5,
+        "diff": "用例「留出2·冷漠同义」：说的话不应包含「从来不管」，实际说出「这种事我们从来不管。」"
+      },
+      {
+        "desc": "留出2·归咎同义",
+        "ok": false,
+        "ms": 4,
+        "diff": "用例「留出2·归咎同义」：说的话不应包含「怨不着」，实际说出「怨不着我们，是您那边的问题。」"
+      },
+      {
+        "desc": "留出2·过度改写对照·工单回执",
+        "ok": true,
+        "ms": 4
+      }
+    ]
+  },
+  "v2": {
+    "src": "return {\n  name: 'a2-forbidden-phrase-filter',\n  inject: ['llm'],\n  apply(ctx) {\n    const INTERNAL = Symbol('a2.internal');\n    let internalDepth = 0;\n\n    // 强禁语：SOP 明确示例 + 已发现的同义表达（消极/质问/甩锅/驱赶/归咎），命中即必须处理\n    const STRONG_PATTERNS = [\n      /不可能/, /做不到/, /没办法/, /无能为力/,\n      /这不是我的责任/, /不是我的责任/, /不归我(管|负责)/,\n      /系统(崩了|崩溃|出bug|出故障|出问题|出异常)/, /系统bug/,\n      /你听不懂吗/, /听明白没有/, /听明白了没/, /听懂没有/, /听懂了没/,\n      /明白没有/, /你到底(懂|明白|听懂)(吗|没有)/, /还要我说(几遍|多少遍|多少次)/,\n      /你是不是听不懂/, /怎么(说|讲)你才明白/, /我说了(多少遍|很多遍|无数遍)了/,\n      /管不了/, /管不着/, /办不到/, /搞不了/, /搞不定/, /修不好/, /修不了/,\n      /帮不了/, /帮不上/, /救不了/, /爱莫能助/, /没(什么|啥)希望/, /白搭/, /没戏/,\n      /爱办不办/, /爱咋(办|地)咋(办|地)/, /爱信不信/, /拉倒吧/,\n      /别再问了/, /别问了/, /不要再问了/, /不要问了/, /别烦(我|我们)/,\n      /别打扰(我|我们)/, /你走吧/, /请(你)?(离开|出去)/, /不要(再)?来(问|烦)(我|我们)/,\n      /没事(就)?(别|不要)来/,\n      /不关我(的)?事/, /跟(我|我们)(没|无)关/, /别找我/, /找(我|我们)(也)?没(用|办法)/,\n      /这不是我的事/, /我有什么办法/, /这事(别|不要)找我/, /(您|你)去找别人/,\n      /怪谁/, /怪你自己/, /都怪你/, /(都|就)怪你/, /怨谁/, /怨你自己/, /谁让你/, /是你自己/,\n      /你(是|是不是)(傻|笨|蠢|有问题)/\n    ];\n\n    // 弱禁语：语义偏消极，主要交给 LLM 判断，避免误伤正常话术\n    const SOFT_PATTERNS = [\n      /随便你/, /随你便/, /你爱怎么(想|说|办)就怎么(想|说|办)/,\n      /明白没(?!有)/, /懂了吗/, /明白了吗/, /自己(看|查|想办法|解决)/,\n      /我不管/, /不想(管|理|回答|说)/, /懒得(管|理|说)/, /烦不烦/, /有病吧/,\n      /放弃吧/, /别(跟|和)我说(这个|这些)/, /这事我(管|负责)?不了/\n    ];\n\n    const ALL_PATTERNS = STRONG_PATTERNS.concat(SOFT_PATTERNS);\n\n    function matchesAny(text, patterns) {\n      if (!text) return false;\n      return patterns.some((re) => re.test(text));\n    }\n\n    async function collectText(iter) {\n      let text = '';\n      for await (const chunk of iter) {\n        if (!chunk || typeof chunk !== 'object') continue;\n        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {\n          text += chunk.text;\n        } else if (chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text' && typeof chunk.block.text === 'string') {\n          text = chunk.block.text;\n        }\n      }\n      return text;\n    }\n\n    async function callLLM(text) {\n      const system = '你是校园网客服的合规审查助手。你负责判断客服话术是否包含态度消极、强势质问、甩锅推诿、驱赶用户、归咎用户等禁语，并在必要时做中立化改写。改写时必须原样保留所有事实信息。';\n      const prompt = [\n        '请对下面这段客服话术做合规检查，并严格只输出一行 JSON（不要输出任何其他内容）：',\n        '{\"needRewrite\": true/false, \"text\": \"...\"}',\n        '',\n        '判断标准：出现以下任一类表达都算违规（含同义说法）：',\n        '1. 消极/否定：不可能、做不到、没办法、管不了、修不好、爱办不办、没戏、无能为力、帮不了等；',\n        '2. 强势质问：你听不懂吗、听明白没有、你到底懂不懂、还要我说几遍、明白没等；',\n        '3. 甩锅推诿：这不是我的责任、不关我事、别找我、不归我管、系统崩了、系统出bug了等；',\n        '4. 驱赶用户：别再问了、别烦我、你走吧、不要再来问等；',\n        '5. 归咎用户：怪谁、怪你自己、都怪你、谁让你、怨你自己等。',\n        '',\n        '如果违规：请改写成中立、礼貌、有帮助的说法，且必须原样保留所有事实信息（账期、金额、日期、账号、材料、办理步骤、业务规则等），任何一个数字、日期、专有名词都不能改动或丢失，needRewrite 设为 true。',\n        '如果不违规：text 字段原样输出原话，不要做任何改动，needRewrite 设为 false。',\n        '',\n        '原话：',\n        text\n      ].join('\\n');\n\n      internalDepth++;\n      try {\n        const options = {\n          provider: 'deepseek-official',\n          model: 'deepseek-chat',\n          reasoningEffort: 'off',\n          system,\n          messages: [\n            {\n              role: 'user',\n              content: [{ type: 'text', text: prompt }],\n              source: { kind: 'user' }\n            }\n          ]\n        };\n        options[INTERNAL] = true; // 标记内部调用，防止撞回本 handler 无限递归\n        const iter = ctx.llm.stream(options);\n        return await collectText(iter);\n      } finally {\n        internalDepth--;\n      }\n    }\n\n    function isTrue(v) {\n      return v === true || v === 'true' || v === '是' || v === 1 || v === '1';\n    }\n\n    function parseLLMResult(raw, original) {\n      if (!raw || typeof raw !== 'string') return { needRewrite: null, text: original };\n      const cleaned = raw.trim();\n      const m = cleaned.match(/\\{[\\s\\S]*\\}/);\n      if (m) {\n        try {\n          const obj = JSON.parse(m[0]);\n          if (obj && typeof obj === 'object') {\n            const need = isTrue(obj.needRewrite);\n            const t = (typeof obj.text === 'string' ? obj.text : (typeof obj.rewritten === 'string' ? obj.rewritten : '')).trim();\n            return { needRewrite: need, text: t || original };\n          }\n        } catch (e) { /* fall through */ }\n      }\n      const stripped = cleaned.replace(/^[\"'“”「」『』`]+|[\"'“”「」『』`]+$/g, '').trim();\n      if (stripped === original) return { needRewrite: false, text: original };\n      return { needRewrite: null, text: stripped || original };\n    }\n\n    // 兜底定向替换：只替换明确的禁语短语，其余文字逐字保留，保证事实不丢\n    const REPLACEMENTS = [\n      [/你到底(是)?(听明白|听懂|明白)(了)?没有/g, '我再为您说明一遍'],\n      [/你(是)?(听明白|听懂|明白)(了)?没有/g, '我再为您说明一遍'],\n      [/还要我说(几遍|多少遍|多少次)/g, '我再为您说明一遍'],\n      [/怎么(说|讲)你才明白/g, '我再为您说明一遍'],\n      [/你是不是听不懂/g, '我再为您说明一遍'],\n      [/你听不懂吗/g, '我再为您说明一遍'],\n      [/听明白没有/g, '我再为您说明一遍'],\n      [/听明白了没/g, '我再为您说明一遍'],\n      [/听懂没有/g, '我再为您说明一遍'],\n      [/听懂了没/g, '我再为您说明一遍'],\n      [/明白没有/g, '我再为您说明一遍'],\n      [/明白没(?!有)/g, '我再为您说明一遍'],\n      [/懂了吗/g, '我再为您说明一遍'],\n      [/明白了吗/g, '我再为您说明一遍'],\n      [/我说了(多少遍|很多遍|无数遍)了/g, '我再为您说明一遍'],\n      [/这事(我|我们)?(管不了|办不到|没办法|搞不了)/g, '这件事我会帮您跟进处理'],\n      [/这件事(我|我们)?(管不了|办不到|没办法|搞不了)/g, '这件事我会帮您跟进处理'],\n      [/(我|我们)(管不了|管不着)/g, '我会帮您跟进处理'],\n      [/这不是我的责任/g, '这个问题我来帮您一起处理'],\n      [/不是我的责任/g, '这个问题我来帮您一起处理'],\n      [/这不是我的事/g, '这个问题我来帮您一起处理'],\n      [/不归我(管|负责)/g, '我帮您转给相关同事处理'],\n      [/不关我(的)?事/g, '这个问题我来帮您一起处理'],\n      [/跟(我|我们)(没|无)关/g, '这个问题我来帮您一起处理'],\n      [/找(我|我们)(也)?没(用|办法)/g, '我帮您转给相关同事处理'],\n      [/(您|你)去找别人(吧)?/g, '我帮您转给相关同事处理'],\n      [/找别人(吧)?/g, '我帮您转给相关同事处理'],\n      [/这事(别|不要)找我/g, '我帮您转给相关同事处理'],\n      [/别找我/g, '我帮您转给相关同事处理'],\n      [/我有什么办法/g, '我帮您看看如何处理'],\n      [/爱办不办/g, '建议您考虑其他处理方式'],\n      [/爱咋(办|地)咋(办|地)/g, '建议您考虑其他处理方式'],\n      [/爱信不信/g, '以上信息供您参考'],\n      [/拉倒吧/g, '那我们先这样处理'],\n      [/不可能/g, '可能暂时无法满足'],\n      [/做不到/g, '暂时无法完成'],\n      [/没办法/g, '暂时没有其他办法'],\n      [/无能为力/g, '暂时没有更好的办法'],\n      [/办不到/g, '暂时无法完成'],\n      [/搞不了/g, '暂时无法完成'],\n      [/搞不定/g, '暂时无法完成'],\n      [/修不好/g, '暂时无法修复'],\n      [/修不了/g, '暂时无法修复'],\n      [/帮不了/g, '暂时无法协助'],\n      [/帮不上/g, '暂时无法协助'],\n      [/救不了/g, '暂时没有更好的办法'],\n      [/爱莫能助/g, '暂时没有更好的办法'],\n      [/没(什么|啥)希望/g, '暂时没有可行的方案'],\n      [/没戏/g, '暂时没有可行的方案'],\n      [/白搭/g, '暂时没有效果'],\n      [/放弃吧/g, '建议您考虑其他方案'],\n      [/随便你/g, '您看这样是否可以'],\n      [/随你便/g, '您看这样是否可以'],\n      [/我不管/g, '我帮您看看如何处理'],\n      [/不想(管|理|回答|说)/g, '我帮您看看如何处理'],\n      [/懒得(管|理|说)/g, '我帮您看看如何处理'],\n      [/烦不烦/g, '请不要着急'],\n      [/你(是|是不是)(傻|笨|蠢|有问题)/g, '我可能没有解释清楚'],\n      [/有病吧/g, '我可能没有解释清楚'],\n      [/你爱怎么(想|说|办)就怎么(想|说|办)/g, '您看这样是否可以'],\n      [/自己(看|查|想办法|解决)/g, '您可以查看'],\n      [/别再问了/g, '我继续为您说明'],\n      [/不要再问了/g, '我继续为您说明'],\n      [/不要问了/g, '我继续为您说明'],\n      [/别问了/g, '我继续为您说明'],\n      [/不要(再)?来(问|烦)(我|我们)/g, '请问还有什么可以帮您'],\n      [/别烦(我|我们)/g, '请问还有什么可以帮您'],\n      [/别打扰(我|我们)/g, '请问还有什么可以帮您'],\n      [/没事(就)?(别|不要)来/g, '请问还有什么可以帮您'],\n      [/你走吧/g, '请问还有什么可以帮您'],\n      [/请(你)?(离开|出去)/g, '请问还有什么可以帮您'],\n      [/别(跟|和)我说(这个|这些)/g, '我继续为您说明'],\n      [/是你自己(没|不|搞|弄)/g, '没有及时'],\n      [/怪你自己/g, '我们一起核实一下原因'],\n      [/都怪你/g, '我们一起核实一下原因'],\n      [/(都|就)怪你/g, '我们一起核实一下原因'],\n      [/怪谁/g, '我们一起核实一下原因'],\n      [/怨你自己/g, '我们一起核实一下原因'],\n      [/怨谁/g, '我们一起核实一下原因'],\n      [/谁让你/g, '当时的情况我们一起来核实'],\n      [/是你自己/g, '我们一起来核实一下情况'],\n      [/你自己的(问题|责任)/g, '我们一起来核实一下情况']\n    ];\n\n    function fallbackReplace(text) {\n      let out = text;\n      for (const [re, rep] of REPLACEMENTS) out = out.replace(re, rep);\n      return out;\n    }\n\n    function extractFactTokens(text) {\n      const tokens = new Set();\n      const patterns = [\n        /\\d+(?:\\.\\d+)?/g,\n        /\\d{4}\\s*[-/年]\\s*\\d{1,2}(?:\\s*[-/月]\\s*\\d{1,2})?/g,\n        /\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日/g,\n        /\\d{1,2}\\s*月/g,\n        /\\d{1,2}\\s*日/g\n      ];\n      for (const p of patterns) {\n        const m = text.match(p);\n        if (m) for (const t of m) tokens.add(t.replace(/\\s+/g, ''));\n      }\n      return tokens;\n    }\n\n    function factsPreserved(original, rewritten) {\n      const facts = extractFactTokens(original);\n      for (const f of facts) {\n        if (f.length >= 2 && !rewritten.includes(f)) return false;\n      }\n      return true;\n    }\n\n    async function rewriteBlock(text) {\n      let raw;\n      try {\n        raw = await callLLM(text);\n      } catch (e) {\n        return fallbackReplace(text);\n      }\n      const parsed = parseLLMResult(raw, text);\n\n      if (parsed.needRewrite === true) {\n        const r = parsed.text && parsed.text !== text ? parsed.text : null;\n        if (r && factsPreserved(text, r) && !matchesAny(r, STRONG_PATTERNS)) return r;\n        return fallbackReplace(text);\n      }\n      if (parsed.needRewrite === false) {\n        // 信任 LLM 的语义判断；但若强禁语仍明确存在（例如模型漏判/回显），强制兜底改写\n        if (matchesAny(text, STRONG_PATTERNS)) return fallbackReplace(text);\n        return text;\n      }\n      // LLM 输出无法解析：用规则兜底\n      if (matchesAny(text, ALL_PATTERNS)) return fallbackReplace(text);\n      return text;\n    }\n\n    ctx.on('llm/stream', (options, next) => {\n      // 防递归：插件自己发起的内部 LLM 调用直接放行\n      if (options && (options[INTERNAL] === true || internalDepth > 0)) {\n        return next(options);\n      }\n\n      const upstream = next(options);\n\n      return (async function* () {\n        // 缓冲整个流，按 index 聚合文本块\n        const chunks = [];\n        const blocks = new Map();\n        const blockOrder = [];\n\n        for await (const chunk of upstream) {\n          chunks.push(chunk);\n          if (!chunk || typeof chunk !== 'object') continue;\n          const idx = chunk.index;\n          const isTextDelta = chunk.type === 'text-delta' && typeof chunk.text === 'string';\n          const isTextEnd = chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text' && typeof chunk.block.text === 'string';\n          if ((isTextDelta || isTextEnd) && idx != null) {\n            if (!blocks.has(idx)) {\n              blocks.set(idx, { text: '' });\n              blockOrder.push(idx);\n            }\n            if (isTextDelta) blocks.get(idx).text += chunk.text;\n            if (isTextEnd) blocks.get(idx).text = chunk.block.text;\n          }\n        }\n\n        // 去掉空块\n        for (const idx of blockOrder) {\n          if (!blocks.get(idx).text) blocks.delete(idx);\n        }\n        const validOrder = blockOrder.filter((idx) => blocks.has(idx));\n\n        // 逐块改写\n        const rewritten = new Map();\n        for (const idx of validOrder) {\n          rewritten.set(idx, await rewriteBlock(blocks.get(idx).text));\n        }\n\n        // 按原顺序重放：文本块的 text-delta 用改写后的单条 delta 代替，block-end 同步改写文本\n        const emitted = new Set();\n        for (const chunk of chunks) {\n          if (!chunk || typeof chunk !== 'object') {\n            yield chunk;\n            continue;\n          }\n          const idx = chunk.index;\n          if (idx != null && blocks.has(idx)) {\n            if (chunk.type === 'text-delta') {\n              continue;\n            }\n            if (chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text') {\n              if (!emitted.has(idx)) {\n                yield { type: 'text-delta', index: idx, text: rewritten.get(idx) };\n                emitted.add(idx);\n              }\n              yield { ...chunk, block: { ...chunk.block, text: rewritten.get(idx) } };\n              continue;\n            }\n          }\n          yield chunk;\n        }\n\n        // 兜底：某文本块只有 delta 没有 block-end 时补发\n        for (const idx of validOrder) {\n          if (!emitted.has(idx)) {\n            yield { type: 'text-delta', index: idx, text: rewritten.get(idx) };\n            yield { type: 'block-end', index: idx, block: { type: 'text', text: rewritten.get(idx) } };\n          }\n        }\n      })();\n    });\n  }\n};\n",
+    "pub": [
+      {
+        "desc": "明示禁语·不可能",
+        "ok": true,
+        "ms": 821
+      },
+      {
+        "desc": "明示禁语·做不到",
+        "ok": true,
+        "ms": 951
+      },
+      {
+        "desc": "明示禁语·没办法",
+        "ok": true,
+        "ms": 1063
+      },
+      {
+        "desc": "明示禁语·这不是我的责任",
+        "ok": true,
+        "ms": 1301
+      },
+      {
+        "desc": "明示禁语·系统崩了",
+        "ok": true,
+        "ms": 677
+      },
+      {
+        "desc": "明示禁语·系统出bug了",
+        "ok": true,
+        "ms": 725
+      },
+      {
+        "desc": "明示禁语·你听不懂吗",
+        "ok": true,
+        "ms": 721
+      },
+      {
+        "desc": "过度改写对照·账单事实",
+        "ok": true,
+        "ms": 623
+      },
+      {
+        "desc": "过度改写对照·索要槽位",
+        "ok": true,
+        "ms": 692
+      }
+    ],
+    "held": [
+      {
+        "desc": "留出·甩锅同义",
+        "ok": true,
+        "ms": 835
+      },
+      {
+        "desc": "留出·质问同义",
+        "ok": true,
+        "ms": 797
+      },
+      {
+        "desc": "留出·消极同义",
+        "ok": true,
+        "ms": 853
+      },
+      {
+        "desc": "留出·驱赶同义",
+        "ok": true,
+        "ms": 923
+      },
+      {
+        "desc": "留出·归咎同义",
+        "ok": true,
+        "ms": 817
+      },
+      {
+        "desc": "留出·过度改写对照·兜底话术",
+        "ok": true,
+        "ms": 749
+      }
+    ],
+    "held2": [
+      {
+        "desc": "留出2·推脱同义",
+        "ok": true,
+        "ms": 774
+      },
+      {
+        "desc": "留出2·不耐烦同义",
+        "ok": true,
+        "ms": 992
+      },
+      {
+        "desc": "留出2·撂挑子同义",
+        "ok": true,
+        "ms": 1036
+      },
+      {
+        "desc": "留出2·冷漠同义",
+        "ok": true,
+        "ms": 902
+      },
+      {
+        "desc": "留出2·归咎同义",
+        "ok": true,
+        "ms": 781
+      },
+      {
+        "desc": "留出2·过度改写对照·工单回执",
+        "ok": true,
+        "ms": 764
+      }
+    ]
+  },
+  "v3": {
+    "src": "return {\n  name: 'a2-forbidden-phrase-filter',\n  inject: ['llm'],\n  apply(ctx) {\n    const INTERNAL = Symbol('a2.internal');\n    let internalDepth = 0;\n\n    // 词表/正则：只用于「模型不可用 / 模型结果不可信」时的兜底，绝不作为调模型之前的闸门。\n    // 语义禁语无精确边界，必须每次都先让模型判定；词表覆盖不到的，只有语义判定拦得住。\n    const STRONG_PATTERNS = [\n      /不可能/, /做不到/, /没办法/, /无能为力/,\n      /这不是我的责任/, /不是我的责任/, /不归我(管|负责)/,\n      /系统(崩了|崩溃|出bug|出故障|出问题|出异常)/, /系统bug/,\n      /你听不懂吗/, /听明白没有/, /听明白了没/, /听懂没有/, /听懂了没/,\n      /明白没有/, /你到底(懂|明白|听懂)(吗|没有)/, /还要我说(几遍|多少遍|多少次)/,\n      /你是不是听不懂/, /怎么(说|讲)你才明白/, /我说了(多少遍|很多遍|无数遍)了/,\n      /管不了/, /管不着/, /办不到/, /搞不了/, /搞不定/, /修不好/, /修不了/,\n      /帮不了/, /帮不上/, /救不了/, /爱莫能助/, /没(什么|啥)希望/, /白搭/, /没戏/,\n      /爱办不办/, /爱咋(办|地)咋(办|地)/, /爱信不信/, /拉倒吧/,\n      /别再问了/, /别问了/, /不要再问了/, /不要问了/, /别烦(我|我们)/,\n      /别打扰(我|我们)/, /你走吧/, /请(你)?(离开|出去)/, /不要(再)?来(问|烦)(我|我们)/,\n      /没事(就)?(别|不要)来/,\n      /不关我(的)?事/, /跟(我|我们)(没|无)关/, /别找我/, /找(我|我们)(也)?没(用|办法)/,\n      /这不是我的事/, /我有什么办法/, /这事(别|不要)找我/, /(您|你)去找别人/,\n      /怪谁/, /怪你自己/, /都怪你/, /(都|就)怪你/, /怨谁/, /怨你自己/, /谁让你/, /是你自己/,\n      /你(是|是不是)(傻|笨|蠢|有问题)/\n    ];\n\n    const SOFT_PATTERNS = [\n      /随便你/, /随你便/, /你爱怎么(想|说|办)就怎么(想|说|办)/,\n      /明白没(?!有)/, /懂了吗/, /明白了吗/, /自己(看|查|想办法|解决)/,\n      /我不管/, /不想(管|理|回答|说)/, /懒得(管|理|说)/, /烦不烦/, /有病吧/,\n      /放弃吧/, /别(跟|和)我说(这个|这些)/, /这事我(管|负责)?不了/\n    ];\n\n    const ALL_PATTERNS = STRONG_PATTERNS.concat(SOFT_PATTERNS);\n\n    function matchesAny(text, patterns) {\n      if (!text) return false;\n      return patterns.some((re) => re.test(text));\n    }\n\n    async function collectText(iter) {\n      let text = '';\n      for await (const chunk of iter) {\n        if (!chunk || typeof chunk !== 'object') continue;\n        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {\n          text += chunk.text;\n        } else if (chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text' && typeof chunk.block.text === 'string') {\n          text = chunk.block.text;\n        }\n      }\n      return text;\n    }\n\n    async function callLLM(text) {\n      const system = '你是校园网客服的合规审查助手。你负责判断客服话术是否包含态度消极、强势质问、甩锅推诿、驱赶用户、归咎用户等禁语，并在必要时做中立化改写。改写时必须原样保留所有事实信息。';\n      const prompt = [\n        '请对下面这段客服话术做合规检查，并严格只输出一行 JSON（不要输出任何其他内容）：',\n        '{\"needRewrite\": true/false, \"text\": \"...\"}',\n        '',\n        '判断标准：出现以下任一类表达都算违规（含同义说法）：',\n        '1. 消极/否定：不可能、做不到、没办法、管不了、修不好、爱办不办、没戏、无能为力、帮不了等；',\n        '2. 强势质问：你听不懂吗、听明白没有、你到底懂不懂、还要我说几遍、明白没等；',\n        '3. 甩锅推诿：这不是我的责任、不关我事、别找我、不归我管、系统崩了、系统出bug了等；',\n        '4. 驱赶用户：别再问了、别烦我、你走吧、不要再来问等；',\n        '5. 归咎用户：怪谁、怪你自己、都怪你、谁让你、怨你自己等。',\n        '',\n        '如果违规：请改写成中立、礼貌、有帮助的说法，且必须原样保留所有事实信息（账期、金额、日期、账号、材料、办理步骤、业务规则等），任何一个数字、日期、专有名词都不能改动或丢失，needRewrite 设为 true。',\n        '如果不违规：text 字段原样输出原话，不要做任何改动，needRewrite 设为 false。',\n        '',\n        '原话：',\n        text\n      ].join('\\n');\n\n      internalDepth++;\n      try {\n        const options = {\n          provider: 'deepseek-official',\n          model: 'deepseek-chat',\n          reasoningEffort: 'off',\n          system,\n          messages: [\n            {\n              role: 'user',\n              content: [{ type: 'text', text: prompt }],\n              source: { kind: 'user' }\n            }\n          ]\n        };\n        options[INTERNAL] = true; // 标记内部调用，防止撞回本 handler 无限递归\n        const iter = ctx.llm.stream(options);\n        return await collectText(iter);\n      } finally {\n        internalDepth--;\n      }\n    }\n\n    function isTrue(v) {\n      return v === true || v === 'true' || v === '是' || v === 1 || v === '1';\n    }\n\n    // reliable=true 表示模型明确按 JSON 给出了语义判定；false 表示结果不可信（回显/无法解析）\n    function parseLLMResult(raw, original) {\n      if (!raw || typeof raw !== 'string') return { needRewrite: null, text: original, reliable: false };\n      const cleaned = raw.trim();\n      const m = cleaned.match(/\\{[\\s\\S]*\\}/);\n      if (m) {\n        try {\n          const obj = JSON.parse(m[0]);\n          if (obj && typeof obj === 'object') {\n            const need = isTrue(obj.needRewrite);\n            const t = (typeof obj.text === 'string' ? obj.text : (typeof obj.rewritten === 'string' ? obj.rewritten : '')).trim();\n            return { needRewrite: need, text: t || original, reliable: true };\n          }\n        } catch (e) { /* fall through */ }\n      }\n      const stripped = cleaned.replace(/^[\"'“”「」『』`]+|[\"'“”「」『』`]+$/g, '').trim();\n      if (stripped === original) return { needRewrite: false, text: original, reliable: false };\n      return { needRewrite: null, text: stripped || original, reliable: false };\n    }\n\n    // 兜底定向替换：只替换明确的禁语短语，其余文字逐字保留，保证事实不丢\n    const REPLACEMENTS = [\n      [/你到底(是)?(听明白|听懂|明白)(了)?没有/g, '我再为您说明一遍'],\n      [/你(是)?(听明白|听懂|明白)(了)?没有/g, '我再为您说明一遍'],\n      [/还要我说(几遍|多少遍|多少次)/g, '我再为您说明一遍'],\n      [/怎么(说|讲)你才明白/g, '我再为您说明一遍'],\n      [/你是不是听不懂/g, '我再为您说明一遍'],\n      [/你听不懂吗/g, '我再为您说明一遍'],\n      [/听明白没有/g, '我再为您说明一遍'],\n      [/听明白了没/g, '我再为您说明一遍'],\n      [/听懂没有/g, '我再为您说明一遍'],\n      [/听懂了没/g, '我再为您说明一遍'],\n      [/明白没有/g, '我再为您说明一遍'],\n      [/明白没(?!有)/g, '我再为您说明一遍'],\n      [/懂了吗/g, '我再为您说明一遍'],\n      [/明白了吗/g, '我再为您说明一遍'],\n      [/我说了(多少遍|很多遍|无数遍)了/g, '我再为您说明一遍'],\n      [/这事(我|我们)?(管不了|办不到|没办法|搞不了)/g, '这件事我会帮您跟进处理'],\n      [/这件事(我|我们)?(管不了|办不到|没办法|搞不了)/g, '这件事我会帮您跟进处理'],\n      [/(我|我们)(管不了|管不着)/g, '我会帮您跟进处理'],\n      [/这不是我的责任/g, '这个问题我来帮您一起处理'],\n      [/不是我的责任/g, '这个问题我来帮您一起处理'],\n      [/这不是我的事/g, '这个问题我来帮您一起处理'],\n      [/不归我(管|负责)/g, '我帮您转给相关同事处理'],\n      [/不关我(的)?事/g, '这个问题我来帮您一起处理'],\n      [/跟(我|我们)(没|无)关/g, '这个问题我来帮您一起处理'],\n      [/找(我|我们)(也)?没(用|办法)/g, '我帮您转给相关同事处理'],\n      [/(您|你)去找别人(吧)?/g, '我帮您转给相关同事处理'],\n      [/找别人(吧)?/g, '我帮您转给相关同事处理'],\n      [/这事(别|不要)找我/g, '我帮您转给相关同事处理'],\n      [/别找我/g, '我帮您转给相关同事处理'],\n      [/我有什么办法/g, '我帮您看看如何处理'],\n      [/爱办不办/g, '建议您考虑其他处理方式'],\n      [/爱咋(办|地)咋(办|地)/g, '建议您考虑其他处理方式'],\n      [/爱信不信/g, '以上信息供您参考'],\n      [/拉倒吧/g, '那我们先这样处理'],\n      [/不可能/g, '可能暂时无法满足'],\n      [/做不到/g, '暂时无法完成'],\n      [/没办法/g, '暂时没有其他办法'],\n      [/无能为力/g, '暂时没有更好的办法'],\n      [/办不到/g, '暂时无法完成'],\n      [/搞不了/g, '暂时无法完成'],\n      [/搞不定/g, '暂时无法完成'],\n      [/修不好/g, '暂时无法修复'],\n      [/修不了/g, '暂时无法修复'],\n      [/帮不了/g, '暂时无法协助'],\n      [/帮不上/g, '暂时无法协助'],\n      [/救不了/g, '暂时没有更好的办法'],\n      [/爱莫能助/g, '暂时没有更好的办法'],\n      [/没(什么|啥)希望/g, '暂时没有可行的方案'],\n      [/没戏/g, '暂时没有可行的方案'],\n      [/白搭/g, '暂时没有效果'],\n      [/放弃吧/g, '建议您考虑其他方案'],\n      [/随便你/g, '您看这样是否可以'],\n      [/随你便/g, '您看这样是否可以'],\n      [/我不管/g, '我帮您看看如何处理'],\n      [/不想(管|理|回答|说)/g, '我帮您看看如何处理'],\n      [/懒得(管|理|说)/g, '我帮您看看如何处理'],\n      [/烦不烦/g, '请不要着急'],\n      [/你(是|是不是)(傻|笨|蠢|有问题)/g, '我可能没有解释清楚'],\n      [/有病吧/g, '我可能没有解释清楚'],\n      [/你爱怎么(想|说|办)就怎么(想|说|办)/g, '您看这样是否可以'],\n      [/自己(看|查|想办法|解决)/g, '您可以查看'],\n      [/别再问了/g, '我继续为您说明'],\n      [/不要再问了/g, '我继续为您说明'],\n      [/不要问了/g, '我继续为您说明'],\n      [/别问了/g, '我继续为您说明'],\n      [/不要(再)?来(问|烦)(我|我们)/g, '请问还有什么可以帮您'],\n      [/别烦(我|我们)/g, '请问还有什么可以帮您'],\n      [/别打扰(我|我们)/g, '请问还有什么可以帮您'],\n      [/没事(就)?(别|不要)来/g, '请问还有什么可以帮您'],\n      [/你走吧/g, '请问还有什么可以帮您'],\n      [/请(你)?(离开|出去)/g, '请问还有什么可以帮您'],\n      [/别(跟|和)我说(这个|这些)/g, '我继续为您说明'],\n      [/是你自己(没|不|搞|弄)/g, '没有及时'],\n      [/怪你自己/g, '我们一起核实一下原因'],\n      [/都怪你/g, '我们一起核实一下原因'],\n      [/(都|就)怪你/g, '我们一起核实一下原因'],\n      [/怪谁/g, '我们一起核实一下原因'],\n      [/怨你自己/g, '我们一起核实一下原因'],\n      [/怨谁/g, '我们一起核实一下原因'],\n      [/谁让你/g, '当时的情况我们一起来核实'],\n      [/是你自己/g, '我们一起来核实一下情况'],\n      [/你自己的(问题|责任)/g, '我们一起来核实一下情况']\n    ];\n\n    function fallbackReplace(text) {\n      let out = text;\n      for (const [re, rep] of REPLACEMENTS) out = out.replace(re, rep);\n      return out;\n    }\n\n    function extractFactTokens(text) {\n      const tokens = new Set();\n      const patterns = [\n        /\\d+(?:\\.\\d+)?/g,\n        /\\d{4}\\s*[-/年]\\s*\\d{1,2}(?:\\s*[-/月]\\s*\\d{1,2})?/g,\n        /\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日/g,\n        /\\d{1,2}\\s*月/g,\n        /\\d{1,2}\\s*日/g\n      ];\n      for (const p of patterns) {\n        const m = text.match(p);\n        if (m) for (const t of m) tokens.add(t.replace(/\\s+/g, ''));\n      }\n      return tokens;\n    }\n\n    function factsPreserved(original, rewritten) {\n      const facts = extractFactTokens(original);\n      for (const f of facts) {\n        if (f.length >= 2 && !rewritten.includes(f)) return false;\n      }\n      return true;\n    }\n\n    async function rewriteBlock(text) {\n      // 关键：不管词表/正则是否命中，都先让模型做语义判定。\n      // 语义禁语没有精确边界，词表覆盖不到的只能靠模型拦。\n      let raw;\n      try {\n        raw = await callLLM(text);\n      } catch (e) {\n        // 模型不可用：退化为词表/正则兜底\n        return fallbackReplace(text);\n      }\n\n      const parsed = parseLLMResult(raw, text);\n\n      if (parsed.needRewrite === true) {\n        const r = parsed.text && parsed.text !== text ? parsed.text : null;\n        if (r && factsPreserved(text, r) && !matchesAny(r, STRONG_PATTERNS)) return r;\n        return fallbackReplace(text);\n      }\n\n      if (parsed.needRewrite === false) {\n        // 模型明确判定无需改写 → 原样透传，信任语义判定。\n        // 仅当模型结果不可靠（没按 JSON 输出、只是回显原文）时，才用强禁语兜底。\n        if (!parsed.reliable && matchesAny(text, STRONG_PATTERNS)) return fallbackReplace(text);\n        return text;\n      }\n\n      // 模型输出无法解析：用词表/正则兜底\n      if (matchesAny(text, ALL_PATTERNS)) return fallbackReplace(text);\n      return text;\n    }\n\n    ctx.on('llm/stream', (options, next) => {\n      // 防递归：插件自己发起的内部 LLM 调用直接放行\n      if (options && (options[INTERNAL] === true || internalDepth > 0)) {\n        return next(options);\n      }\n\n      const upstream = next(options);\n\n      return (async function* () {\n        // 缓冲整个流，按 index 聚合文本块\n        const chunks = [];\n        const blocks = new Map();\n        const blockOrder = [];\n\n        for await (const chunk of upstream) {\n          chunks.push(chunk);\n          if (!chunk || typeof chunk !== 'object') continue;\n          const idx = chunk.index;\n          const isTextDelta = chunk.type === 'text-delta' && typeof chunk.text === 'string';\n          const isTextEnd = chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text' && typeof chunk.block.text === 'string';\n          if ((isTextDelta || isTextEnd) && idx != null) {\n            if (!blocks.has(idx)) {\n              blocks.set(idx, { text: '' });\n              blockOrder.push(idx);\n            }\n            if (isTextDelta) blocks.get(idx).text += chunk.text;\n            if (isTextEnd) blocks.get(idx).text = chunk.block.text;\n          }\n        }\n\n        // 去掉空块\n        for (const idx of blockOrder) {\n          if (!blocks.get(idx).text) blocks.delete(idx);\n        }\n        const validOrder = blockOrder.filter((idx) => blocks.has(idx));\n\n        // 逐块改写：每块都先过模型语义判定\n        const rewritten = new Map();\n        for (const idx of validOrder) {\n          rewritten.set(idx, await rewriteBlock(blocks.get(idx).text));\n        }\n\n        // 按原顺序重放：文本块的 text-delta 用改写后的单条 delta 代替，block-end 同步改写文本\n        const emitted = new Set();\n        for (const chunk of chunks) {\n          if (!chunk || typeof chunk !== 'object') {\n            yield chunk;\n            continue;\n          }\n          const idx = chunk.index;\n          if (idx != null && blocks.has(idx)) {\n            if (chunk.type === 'text-delta') {\n              continue;\n            }\n            if (chunk.type === 'block-end' && chunk.block && chunk.block.type === 'text') {\n              if (!emitted.has(idx)) {\n                yield { type: 'text-delta', index: idx, text: rewritten.get(idx) };\n                emitted.add(idx);\n              }\n              yield { ...chunk, block: { ...chunk.block, text: rewritten.get(idx) } };\n              continue;\n            }\n          }\n          yield chunk;\n        }\n\n        // 兜底：某文本块只有 delta 没有 block-end 时补发\n        for (const idx of validOrder) {\n          if (!emitted.has(idx)) {\n            yield { type: 'text-delta', index: idx, text: rewritten.get(idx) };\n            yield { type: 'block-end', index: idx, block: { type: 'text', text: rewritten.get(idx) } };\n          }\n        }\n      })();\n    });\n  }\n};\n",
+    "pub": [
+      {
+        "desc": "明示禁语·不可能",
+        "ok": true,
+        "ms": 705
+      },
+      {
+        "desc": "明示禁语·做不到",
+        "ok": true,
+        "ms": 730
+      },
+      {
+        "desc": "明示禁语·没办法",
+        "ok": true,
+        "ms": 983
+      },
+      {
+        "desc": "明示禁语·这不是我的责任",
+        "ok": true,
+        "ms": 864
+      },
+      {
+        "desc": "明示禁语·系统崩了",
+        "ok": true,
+        "ms": 704
+      },
+      {
+        "desc": "明示禁语·系统出bug了",
+        "ok": true,
+        "ms": 993
+      },
+      {
+        "desc": "明示禁语·你听不懂吗",
+        "ok": true,
+        "ms": 663
+      },
+      {
+        "desc": "过度改写对照·账单事实",
+        "ok": true,
+        "ms": 668
+      },
+      {
+        "desc": "过度改写对照·索要槽位",
+        "ok": true,
+        "ms": 562
+      }
+    ],
+    "held": [
+      {
+        "desc": "留出·甩锅同义",
+        "ok": true,
+        "ms": 916
+      },
+      {
+        "desc": "留出·质问同义",
+        "ok": true,
+        "ms": 721
+      },
+      {
+        "desc": "留出·消极同义",
+        "ok": true,
+        "ms": 706
+      },
+      {
+        "desc": "留出·驱赶同义",
+        "ok": true,
+        "ms": 1045
+      },
+      {
+        "desc": "留出·归咎同义",
+        "ok": true,
+        "ms": 740
+      },
+      {
+        "desc": "留出·过度改写对照·兜底话术",
+        "ok": true,
+        "ms": 991
+      }
+    ],
+    "held2": [
+      {
+        "desc": "留出2·推脱同义",
+        "ok": true,
+        "ms": 1005
+      },
+      {
+        "desc": "留出2·不耐烦同义",
+        "ok": true,
+        "ms": 762
+      },
+      {
+        "desc": "留出2·撂挑子同义",
+        "ok": true,
+        "ms": 943
+      },
+      {
+        "desc": "留出2·冷漠同义",
+        "ok": true,
+        "ms": 761
+      },
+      {
+        "desc": "留出2·归咎同义",
+        "ok": true,
+        "ms": 841
+      },
+      {
+        "desc": "留出2·过度改写对照·工单回执",
+        "ok": true,
+        "ms": 690
+      }
+    ]
+  }
+}
