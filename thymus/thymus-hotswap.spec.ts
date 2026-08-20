@@ -20,7 +20,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
-import { gateSay } from './thymus-src/gate.ts'
+import { gateSay, installToolGate } from './thymus-src/gate.ts'
 
 const SESSION = 'swap'
 const agent = { id: SESSION } as never
@@ -176,5 +176,66 @@ describe('热替换 · 运行中换掉正在生效的插件', () => {
     expect(res.text).not.toContain('deleted')      // 关键：失败方向是不放行，不是放行
     // 换版之后的新调用正常走新版
     expect((await callDelete(ctx)).text).toContain('v2 拒绝')
+  })
+})
+
+// ── 换到一半失败：旧版是留着还是也没了 ──
+// 这条有安全含义：若新版挂载失败时旧版已被卸掉，约束就消失了，等于一次绕过。
+
+/** 语法坏掉的源码：define 阶段就该被 precheckCode 拦下。 */
+const BROKEN_SYNTAX = `return { name:'broken', apply(ctx){ this is not javascript `
+/** 语法合法但 apply 里抛错：过得了 define，死在 run 的宿主装载阶段。 */
+const THROWS_ON_APPLY = `return { name:'boom', apply(ctx){ throw new Error('装载时炸了'); } }`
+/** 语法合法但返回的不是插件：run 阶段的另一种失败形态。 */
+const NOT_A_PLUGIN = `return 42`
+
+describe('热替换 · 换到一半失败', () => {
+  it('论证28 新版语法坏掉：define 阶段就拒，旧版原封不动', async () => {
+    const ctx = await boot()
+    const id = await mountFirst(ctx, denyPlugin('v1'), 'swf')
+    expect((await callDelete(ctx)).text).toContain('v1 拒绝')
+    let rejected = false
+    try { await swap(ctx, id, BROKEN_SYNTAX, 'broken') } catch { rejected = true }
+    expect(rejected).toBe(true)
+    // 关键：旧版仍在生效，没有出现「约束消失」的窗口
+    const after = await callDelete(ctx)
+    expect(after.isError).toBe(true)
+    expect(after.text).toContain('v1 拒绝')
+  })
+
+  it('论证29 新版 apply 抛错：run 失败，且旧约束被带走了', async () => {
+    const ctx = await boot()
+    const id = await mountFirst(ctx, denyPlugin('v1'), 'swg')
+    expect((await callDelete(ctx)).isError).toBe(true)
+    const ok = await swap(ctx, id, THROWS_ON_APPLY, 'boom')
+    expect(ok).toBe(false)                     // 换版没成功
+    // ★ 实测：换版失败之后约束消失了，调用被放行。
+    // 旧版在新版确认装载之前就被 retract 掉了，于是失败留下的是「没有约束」而不是「旧约束」。
+    expect((await callDelete(ctx)).isError, '换版失败后约束是否仍生效').toBe(false)
+  })
+
+  it('论证30 新版返回的不是插件：同样把旧约束带走', async () => {
+    const ctx = await boot()
+    const id = await mountFirst(ctx, denyPlugin('v1'), 'swh')
+    expect((await callDelete(ctx)).isError).toBe(true)
+    const ok = await swap(ctx, id, NOT_A_PLUGIN, 'notplugin')
+    expect(ok).toBe(false)
+    expect((await callDelete(ctx)).isError).toBe(false)
+  })
+
+  it('论证31 网关不在动态注册表里，换版失败带不走它', async () => {
+    const ctx = await boot()
+    installToolGate(ctx, [{
+      name: 'gate-no-delete',
+      preTool: c => c.name === 'delete_file'
+        ? { kind: 'deny', reason: '网关拒绝' }
+        : { kind: 'allow' },
+    }])
+    const id = await mountFirst(ctx, denyPlugin('v1'), 'swi')
+    expect(await swap(ctx, id, THROWS_ON_APPLY, 'boom')).toBe(false)
+    // 插件侧的约束没了，但网关还在——这正是「约束不进动态注册表」的价值
+    const after = await callDelete(ctx)
+    expect(after.isError).toBe(true)
+    expect(after.text).toContain('网关拒绝')
   })
 })
