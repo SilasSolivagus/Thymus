@@ -56,9 +56,14 @@ export interface EvalAssert {
    * output-excludes —— 调用正常返回，且产出文本不包含 value
    * said-includes   —— 最后一个 say 步改写后的文本包含 value
    * said-excludes   —— 最后一个 say 步改写后的文本不包含 value
+   * said-equals     —— 最后一个 say 步改写后的文本与 value 逐字相等
+   *
+   * 回归集要用 `said-equals` 而不是 `said-includes`：后者判的是「原文还在里面」，
+   * 一个给文本加前缀的插件（`【已优化】原文`）照样通过——抓得住删改，抓不住添加。
+   * 这是拿合成的过度改写插件做阳性对照时暴露出来的。
    */
   kind: 'allowed' | 'denied' | 'output-includes' | 'output-excludes'
-    | 'said-includes' | 'said-excludes'
+    | 'said-includes' | 'said-excludes' | 'said-equals'
   value?: string
 }
 
@@ -205,8 +210,14 @@ function checkAssert(c: EvalCase, o: CaseOutcome): string | undefined {
   const { kind, value } = c.assert
   switch (kind) {
     case 'said-includes':
-    case 'said-excludes': {
+    case 'said-excludes':
+    case 'said-equals': {
       if (o.saidText === undefined) return `断言 ${kind} 判说话通道，但本用例没有 say 步`
+      if (kind === 'said-equals') {
+        return o.saidText === (value ?? '')
+          ? undefined
+          : `说的话应与原文逐字相同，实际说出「${o.saidText}」`
+      }
       const hit = o.saidText.includes(value ?? '')
       if (kind === 'said-includes') return hit ? undefined : `说的话应包含「${value}」，实际说出「${o.saidText}」`
       return hit ? `说的话不应包含「${value}」，实际说出「${o.saidText}」` : undefined
@@ -234,6 +245,60 @@ function checkAssert(c: EvalCase, o: CaseOutcome): string | undefined {
       return o.lastText.includes(value ?? '') ? `产出不应包含「${value}」，实际包含了` : undefined
     default:
       return undefined
+  }
+}
+
+/** 一条负向断言：不挂任何插件时它就该垮。 */
+const NEGATIVE = new Set(['denied', 'output-excludes', 'said-excludes'])
+
+/** 评测集的梯度体检结果。 */
+export interface GradientReport {
+  /** 通过体检：整组有梯度，且没有死掉的负向用例。 */
+  ok: boolean
+  total: number
+  /** 空插件组下垮掉的条数。为 0 说明这组评测奖励「什么都不拦」。 */
+  brokenByEmpty: number
+  /** 负向断言却在空插件组下也通过的用例——它们没有判别力，是死用例。 */
+  deadNegatives: string[]
+  /** 空插件组下通过的正向用例数。过度改写对照本就该在这里，属正常。 */
+  passingPositives: number
+}
+
+/**
+ * 评测集的梯度体检：把整组用例对**空插件组**重放一遍。
+ *
+ * 冻结一组评测之前该跑这个。发现 03 里自造评测的断言方向整个反了，
+ * 空插件组 24/24 全过，而三方独立闭环里没有任何位置能发现题错了——
+ * 这类错是机械挡得住的，就不该留给人。
+ *
+ * 判据分正负向，不能简单要求「空组必须全垮」：
+ *   负向断言（denied / output-excludes / said-excludes）—— 空组下**每一条都该垮**。
+ *     垮不掉说明这条没有判别力（断言的词根本不会出现），是死用例。
+ *   正向断言（allowed / output-includes / said-includes）—— 空组下通过是正常的，
+ *     过度改写对照就该长这样。这里只计数，不判错。
+ *
+ * @param cases - 待冻结的评测用例。
+ * @param makeTools - 该 spec 的环境工具集。
+ * @param options - 见 {@link JudgeOptions}；缺省不装 LlmRuntime。
+ * @returns 体检结果；`ok` 为 false 时不应冻结这组评测。
+ */
+export async function checkEvalGradient(
+  cases: readonly EvalCase[],
+  makeTools: () => ToolDefinition[],
+  options: JudgeOptions = {},
+): Promise<GradientReport> {
+  let brokenByEmpty = 0
+  let passingPositives = 0
+  const deadNegatives: string[] = []
+  for (const c of cases) {
+    const r = await judgeCases([], [c], makeTools, options)
+    if (!r.passed) { brokenByEmpty++; continue }
+    if (NEGATIVE.has(c.assert.kind)) deadNegatives.push(c.description)
+    else passingPositives++
+  }
+  return {
+    ok: brokenByEmpty > 0 && deadNegatives.length === 0,
+    total: cases.length, brokenByEmpty, deadNegatives, passingPositives,
   }
 }
 

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { judgeCases, type EvalCase } from './thymus-src/eval-framework.ts'
+import { judgeCases, checkEvalGradient, type EvalCase } from './thymus-src/eval-framework.ts'
 
 const T = (name: string, ret: string): ToolDefinition => ({
   name, description: name,
@@ -153,5 +153,56 @@ describe('通用评测框架 · 第四档 托管调模型的插件', () => {
       llm: ctx => { ctx.llm.registerAdapter(['fake'], new FakeJudgeAdapter()) },
     })
     expect(r.passed).toBe(true)
+  })
+})
+
+// ── 评测集的梯度体检：冻结之前该跑的那道闸 ──
+// 发现 03 的教训：自造评测断言方向整个反了，空插件组 24/24 全过，
+// 而三方独立闭环里没有任何位置能发现题错了。这类错机械挡得住。
+describe('评测集梯度体检 · checkEvalGradient', () => {
+  it('正常评测集：负向用例全垮，正向对照全过，判定通过', async () => {
+    const cases: EvalCase[] = [
+      { description: '非 .tmp 应拒绝', steps: [{ tool: 'delete_file', args: { path: 'notes.txt' } }], assert: { kind: 'denied' } },
+      { description: '.tmp 应放行（正向对照）', steps: [{ tool: 'delete_file', args: { path: 'a.tmp' } }], assert: { kind: 'allowed' } },
+    ]
+    const r = await checkEvalGradient(cases, T1_TOOLS)
+    expect(r.ok).toBe(true)
+    expect(r.brokenByEmpty).toBe(1)
+    expect(r.passingPositives).toBe(1)
+    expect(r.deadNegatives).toEqual([])
+  })
+
+  it('方向反了的评测集：空插件组全过，判定不通过', async () => {
+    // 只有正向断言，没有任何一条要求拦截——这就是发现 03 那组评测的形状
+    const cases: EvalCase[] = [
+      { description: '删 a.tmp 放行', steps: [{ tool: 'delete_file', args: { path: 'a.tmp' } }], assert: { kind: 'allowed' } },
+      { description: '删 notes.txt 也放行', steps: [{ tool: 'delete_file', args: { path: 'notes.txt' } }], assert: { kind: 'allowed' } },
+    ]
+    const r = await checkEvalGradient(cases, T1_TOOLS)
+    expect(r.ok).toBe(false)
+    expect(r.brokenByEmpty).toBe(0)   // 一条都没垮 = 奖励「什么都不拦」
+  })
+
+  it('死用例：负向断言但空插件组也过，被点名', async () => {
+    const cases: EvalCase[] = [
+      { description: '非 .tmp 应拒绝', steps: [{ tool: 'delete_file', args: { path: 'notes.txt' } }], assert: { kind: 'denied' } },
+      // 产出里根本不会出现这个词，所以这条断言永远成立，没有判别力
+      { description: '产出不得含「永不出现的词」', steps: [{ tool: 'delete_file', args: { path: 'a.tmp' } }], assert: { kind: 'output-excludes', value: '永不出现的词' } },
+    ]
+    const r = await checkEvalGradient(cases, T1_TOOLS)
+    expect(r.ok).toBe(false)                                   // 有梯度但有死用例，仍不通过
+    expect(r.brokenByEmpty).toBe(1)
+    expect(r.deadNegatives).toEqual(['产出不得含「永不出现的词」'])
+  })
+
+  it('说话通道同样体检得动', async () => {
+    const cases: EvalCase[] = [
+      { description: '禁语须消失', steps: [{ kind: 'say', text: '这个不可能' }], assert: { kind: 'said-excludes', value: '不可能' } },
+      { description: '合规话术须原样（正向对照）', steps: [{ kind: 'say', text: '已为您核实' }], assert: { kind: 'said-includes', value: '已为您核实' } },
+    ]
+    const r = await checkEvalGradient(cases, () => [])
+    expect(r.ok).toBe(true)
+    expect(r.brokenByEmpty).toBe(1)
+    expect(r.passingPositives).toBe(1)
   })
 })
