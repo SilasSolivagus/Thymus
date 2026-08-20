@@ -25,7 +25,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
-import { installToolGate, gateSay, adjudicate, type Constraint } from './thymus-src/gate.ts'
+import { installToolGate, gateSay, adjudicate, judgeText, type Constraint } from './thymus-src/gate.ts'
 
 const SESSION = 'gate'
 const agent = { id: SESSION } as never
@@ -509,5 +509,70 @@ describe('判决聚合层 · 代价与失败路径', () => {
     const bogus = { name: 'bogus', say: () => ({ kind: '随便什么' }) } as unknown as Constraint
     const r = await gateSay(ctx, '您好', [bogus])
     expect(r.verdict.kind).toBe('deny')
+  })
+})
+
+// ── judgeText 的覆盖面：验我们自己的修法，而不是假设它管用 ──
+// dsh 的 finish 有五种结束原因（stop / tool-calls / max-tokens / aborted / error），
+// 而且类型是 merge-extensible，adapter 还能加自己的。除 stop 外一律不能当成有效判定。
+
+/** 按脚本发 chunk 的假模型：想造哪种结束形态就造哪种。 */
+class ScriptedAdapter extends LlmAdapter {
+  constructor(private readonly script: StreamChunk[]) { super() }
+  async * stream(): AsyncIterable<StreamChunk> { for (const c of this.script) yield c }
+}
+
+const textChunks = (text: string): StreamChunk[] => [
+  { type: 'block-start', index: 0, blockType: 'text' },
+  { type: 'text-delta', index: 0, text },
+  { type: 'block-end', index: 0, block: { type: 'text', text } },
+]
+
+async function judgeWith(script: StreamChunk[]): Promise<{ text?: string; error?: string }> {
+  const ctx = new Context()
+  await ctx.plugin(Timer)
+  await ctx.plugin(LlmRuntime)
+  ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter(script))
+  try {
+    const text = await judgeText(ctx, {
+      provider: 'scripted', model: 'scripted',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'user' } }],
+    } as never)
+    return { text }
+  } catch (e) { return { error: e instanceof Error ? e.message : String(e) } }
+}
+
+describe('judgeText · 五种结束形态的覆盖', () => {
+  it('论证38 stop：正常返回文本', async () => {
+    const r = await judgeWith([...textChunks('判定结果'), { type: 'finish', reason: { kind: 'stop' } }])
+    expect(r.text).toBe('判定结果')
+    expect(r.error).toBeUndefined()
+  })
+
+  it('论证39 max-tokens：判定被截断，有文本也不能当成有效判定', async () => {
+    const r = await judgeWith([...textChunks('判定被截断到一半'), { type: 'finish', reason: { kind: 'max-tokens' } } as never])
+    expect(r.error).toContain('未正常结束')      // ★ 有文本最容易被误当成成功
+    expect(r.text).toBeUndefined()
+  })
+
+  it('论证40 aborted：同样抛错', async () => {
+    const r = await judgeWith([{ type: 'finish', reason: { kind: 'aborted', failure: { message: '取消了', code: 'ABORTED' } } } as never])
+    expect(r.error).toContain('未正常结束')
+  })
+
+  it('论证41 error：抛错并带上原始失败信息', async () => {
+    const r = await judgeWith([{ type: 'finish', reason: { kind: 'error', failure: { message: '上游炸了', code: 'UNKNOWN' } } } as never])
+    expect(r.error).toContain('未正常结束')
+    expect(r.error).toContain('上游炸了')
+  })
+
+  it('论证42 根本没有 finish：流干净结束但没给结束原因，也要抛错', async () => {
+    const r = await judgeWith(textChunks('看着像判定结果'))
+    expect(r.error).toContain('没有给出结束原因')   // 不能把没有结论当成结论
+  })
+
+  it('论证43 adapter 自扩展的未知结束原因：不认识就不放行', async () => {
+    const r = await judgeWith([...textChunks('x'), { type: 'finish', reason: { kind: 'provider-specific-weirdness' } } as never])
+    expect(r.error).toContain('未正常结束')
   })
 })
