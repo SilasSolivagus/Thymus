@@ -18,7 +18,7 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
-import { BlockAssembler, CallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { BlockAssembler, CallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -69,6 +69,21 @@ export interface EvalCase {
   assert: EvalAssert
 }
 
+/** 判定器的可选装配。 */
+export interface JudgeOptions {
+  /**
+   * opt-in：给判定用的 context 装上 `LlmRuntime`，让「自己要调模型」的插件
+   * （`inject: ['llm']`，在 `llm/stream` 里再发起一次模型调用）能挂得起来。
+   * 缺省不装——既有 spec 保持确定性、不花钱；不装时这类插件拿不到 llm 服务，
+   * `apply` 不会执行，插件静默失效。
+   *
+   * 回调在 `LlmRuntime` 之后、候选插件挂载之前调用，由调用方决定接哪个
+   * provider：真 provider 插件（要 API key、要花钱），或测试用的假 adapter
+   * （`ctx.llm.registerAdapter(['fake'], adapter)`）。判定器不认识任何 provider。
+   */
+  llm?: (ctx: Context) => void | Promise<void>
+}
+
 /** 判定结果。 */
 export interface JudgeResult {
   passed: boolean
@@ -96,10 +111,13 @@ function sayUpstream(text: string): AsyncIterable<StreamChunk> {
 }
 
 /**
- * 重放一次说话：直接 dispatch `llm/stream` waterfall（不加载 LlmRuntime——
- * waterfall 是 ctx 上的事件分发，不依赖那个服务实例），把假上游喂进去，
- * 用 dsh 自己的 BlockAssembler 归集下游产出。归集算法与 agent loop 落进
+ * 重放一次说话：直接 dispatch `llm/stream` waterfall（waterfall 是 ctx 上的事件
+ * 分发，不依赖 LlmRuntime 那个服务实例，所以缺省不装它也能重放），把假上游喂
+ * 进去，用 dsh 自己的 BlockAssembler 归集下游产出。归集算法与 agent loop 落进
  * assistant 消息用的是同一份，所以判定器看到的文本就是用户会看到的文本。
+ *
+ * provider/model 固定为 `judge`：这段不经过任何 provider（上游是假的），但插件
+ * 若要防递归，可用它区分「用户看的话」与「自己发起的判定调用」。
  */
 async function runSay(ctx: Context, text: string): Promise<string> {
   const options: GenerateOptions = { provider: 'judge', model: 'judge', messages: [] }
@@ -110,9 +128,18 @@ async function runSay(ctx: Context, text: string): Promise<string> {
 }
 
 /** 在全新 context 挂载一组候选插件，按序执行一条用例的所有步骤，返回最后一步的可观测结果。 */
-async function runCase(sources: readonly string[], c: EvalCase, makeTools: () => ToolDefinition[]): Promise<CaseOutcome> {
+async function runCase(
+  sources: readonly string[],
+  c: EvalCase,
+  makeTools: () => ToolDefinition[],
+  options: JudgeOptions,
+): Promise<CaseOutcome> {
   const ctx = new Context()
   await ctx.plugin(Timer)
+  if (options.llm !== undefined) {
+    await ctx.plugin(LlmRuntime)
+    await options.llm(ctx)
+  }
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(DynamicCordisRunner, {})
@@ -215,17 +242,19 @@ function checkAssert(c: EvalCase, o: CaseOutcome): string | undefined {
  * @param source - 开发方提交的宿主半插件源码，单个或一组（一组则全部挂进同一运行时）。
  * @param cases - 冻结的评测用例。
  * @param makeTools - 该 spec 的环境工具集（每条用例重新构造，避免状态跨例泄漏）。
+ * @param options - 可选装配，见 {@link JudgeOptions}；缺省不装 LlmRuntime。
  * @returns 判定结果，diffs 仅含可观测差异。
  */
 export async function judgeCases(
   source: string | readonly string[],
   cases: readonly EvalCase[],
   makeTools: () => ToolDefinition[],
+  options: JudgeOptions = {},
 ): Promise<JudgeResult> {
   const sources = typeof source === 'string' ? [source] : source
   const diffs: string[] = []
   for (const c of cases) {
-    const outcome = await runCase(sources, c, makeTools)
+    const outcome = await runCase(sources, c, makeTools, options)
     if (outcome.error !== undefined) { diffs.push(`用例「${c.description}」：${outcome.error}`); continue }
     const diff = checkAssert(c, outcome)
     if (diff !== undefined) diffs.push(`用例「${c.description}」：${diff}`)

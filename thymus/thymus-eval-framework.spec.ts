@@ -3,6 +3,8 @@
  * 每档都验：正确器官通过、错误器官被抓住。不花模型。
  */
 import { describe, expect, it } from 'vitest'
+import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { judgeCases, type EvalCase } from './thymus-src/eval-framework.ts'
 
@@ -83,5 +85,73 @@ describe('通用评测框架 · 三档递增', () => {
       { description: '15位不脱敏', steps: [{ tool: 'fetch_record', args: { id: '2' }, stubReturn: '编号 123456789012345 结束' }], assert: { kind: 'output-includes', value: '123456789012345' } },
     ]
     expect((await judgeCases(T3_OK, cases, T3_TOOLS)).passed).toBe(true)
+  })
+})
+
+// ── 第四档：托管调模型的插件 · 判定器 opt-in 装 LlmRuntime ──
+// 插件 inject: ['llm']，在 llm/stream 里再发起一次模型调用做判定与改写
+// （形态与 campus/probe-semantic-guard.ts 的语义版一致）。
+// 这里用假 adapter 代替真模型：判定逻辑固定，测试确定、不花钱。
+class FakeJudgeAdapter extends LlmAdapter {
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const last = options.messages[options.messages.length - 1]
+    const part = last?.content.find(c => c.type === 'text')
+    const input = part?.type === 'text' ? part.text : ''
+    const out = input.includes('不可能') ? '需要进一步确认' : input
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: out }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: out } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+const T4_CASES: EvalCase[] = [
+  { description: '禁语须被改写', steps: [{ kind: 'say', text: '这个不可能' }], assert: { kind: 'said-excludes', value: '不可能' } },
+  { description: '正常话术须原样', steps: [{ kind: 'say', text: '已为您核实' }], assert: { kind: 'said-includes', value: '已为您核实' } },
+]
+// 防递归：自己发起的判定调用走 provider 'fake'，见到就直接放行。
+const T4_GUARD = `return { name:'g', inject:['llm'], apply(ctx){
+  ctx.on('llm/stream',(options,next)=>{
+    if(options.provider==='fake') return next();
+    const upstream=next();
+    return (async function*(){
+      for await (const chunk of upstream){
+        if(chunk && chunk.type==='text-delta') continue;
+        if(chunk && chunk.type==='block-end' && chunk.block && chunk.block.type==='text'){
+          let out='';
+          for await (const c of ctx.llm.stream({ provider:'fake', model:'fake', messages:[
+            { role:'user', content:[{type:'text',text:chunk.block.text}], source:{kind:'user'} }] })){
+            if(c && c.type==='block-end' && c.block && c.block.type==='text') out=c.block.text;
+          }
+          yield { type:'text-delta', index:chunk.index, text:out };
+          yield { ...chunk, block:{ ...chunk.block, text:out } };
+          continue;
+        }
+        yield chunk;
+      }
+    })();
+  });
+} }`
+
+describe('通用评测框架 · 第四档 托管调模型的插件', () => {
+  it('不开 llm：插件拿不到 llm 服务，静默失效，禁语原样漏出', async () => {
+    const r = await judgeCases(T4_GUARD, T4_CASES, () => [])
+    expect(r.passed).toBe(false)
+    expect(r.diffs.some(d => d.includes('禁语'))).toBe(true)
+  })
+
+  it('开 llm：插件调得到模型，两条用例都过', async () => {
+    const r = await judgeCases(T4_GUARD, T4_CASES, () => [], {
+      llm: ctx => { ctx.llm.registerAdapter(['fake'], new FakeJudgeAdapter()) },
+    })
+    expect(r.diffs).toEqual([])
+    expect(r.passed).toBe(true)
+  })
+
+  it('开 llm 不影响工具通道既有用例', async () => {
+    const r = await judgeCases(T1_OK, T1_CASES, T1_TOOLS, {
+      llm: ctx => { ctx.llm.registerAdapter(['fake'], new FakeJudgeAdapter()) },
+    })
+    expect(r.passed).toBe(true)
   })
 })
