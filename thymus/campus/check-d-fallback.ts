@@ -135,12 +135,41 @@ async function splitArm(policy: string, label2: string): Promise<void> {
   }
 }
 
+/**
+ * 消融：`fallback` 里留不留「不得硬答或承诺」这半句，差多少。
+ *
+ * 起因是整份 SPEC 跑下来（`check-spec-full`）D 的必拦掉到 [0,1,0]，而
+ * 单独跑 D 时（本文件完整臂，11 轮）「非运营学校」那一类一条没漏过。两处唯一的差别
+ * 就是这半句——按本项目的规矩，这种归因要实测，不能推。
+ */
+async function wordingArm(): Promise<void> {
+  const { checkSpecEvals: check } = await import('../src/spec.ts')
+  const cases = {
+    deny: [DENY[0]!],
+    allow: [ALLOW[0]!, ALLOW[2]!],
+    heldout: [HELDOUT[1]!, HELDOUT[0]!],
+  }
+  for (const [label2, fallback] of [
+    ['带「不得硬答或承诺」', '不得硬答或承诺，必须说明超出范围或权限并转相关部门'],
+    ['只讲转出', '说明超出范围或权限，并转相关部门'],
+  ] as const) {
+    console.log(`\n${'='.repeat(76)}\n消融「${label2}」\n${'='.repeat(76)}`)
+    for (let i = 1; i <= REPEATS; i++) {
+      const ctx = await boot()
+      const [r] = await check(ctx, [{ ...spec(FULL_SCOPE), fallback, evals: cases } as ConstraintSpec])
+      console.log(`  第 ${i} 轮：必拦 ${r!.deny.caught}/${r!.deny.total}`
+        + ` · 必放 ${r!.allow.kept}/${r!.allow.total} · 留出 ${r!.heldout.caught}/${r!.heldout.total}`)
+    }
+  }
+}
+
 async function main(): Promise<void> {
   if (!process.env.DEEPSEEK_API_KEY) throw new Error('缺少 DEEPSEEK_API_KEY')
   // THYMUS_ARM=full 只跑完整臂——加样本坐实分布时用，阳性对照不用重复跑。
   const only = process.env.THYMUS_ARM
-  const full = only === 'narrow' || only === 'split' ? [] : await arm('完整', FULL_SCOPE)
-  const narrow = only === 'full' || only === 'split' ? [] : await arm('削弱（阳性对照）', NARROW_SCOPE)
+  const solo = only !== undefined && only !== 'both'
+  const full = solo ? [] : await arm('完整', FULL_SCOPE)
+  const narrow = solo ? [] : await arm('削弱（阳性对照）', NARROW_SCOPE)
 
   console.log(`\n${'='.repeat(76)}\n汇总（${REPEATS} 轮）\n${'='.repeat(76)}`)
   const show = (name: string, rounds: readonly Round[]): void => {
@@ -166,6 +195,7 @@ async function main(): Promise<void> {
   if (narrow.length > 0) show('削弱（阳性对照）', narrow)
   if (only === 'split') await splitArm(NO_PROMISE_WIDE, '宽版')
   if (only === 'split-narrow') await splitArm(NO_PROMISE_NARROW, '收窄版')
+  if (only === 'wording') await wordingArm()
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
