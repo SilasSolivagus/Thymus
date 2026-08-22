@@ -10,7 +10,9 @@ import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { gateSay } from './thymus-src/gate.ts'
+import { CallId } from '@deepseek-ai/dsh-llm'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { gateSay, installToolGate } from './thymus-src/gate.ts'
 import {
   checkSpecEvals, compileConstraints, formatSpecEvalReports, type ConstraintSpec,
 } from './thymus-src/spec.ts'
@@ -29,6 +31,8 @@ class PolicyJudge extends LlmAdapter {
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
+
+const agent = { id: 'spec' } as never
 
 async function boot(judge?: LlmAdapter): Promise<Context> {
   const ctx = new Context()
@@ -156,5 +160,100 @@ describe('约束声明 · 验收用例跟着约束一起跑', () => {
     expect(text).toContain('内部术语不外泄')
     expect(text).toContain('留出 0/1')
     expect(text).toContain('字面词表在留出集上必漏')
+  })
+})
+
+// ── C 类：内部字段不外泄，在工具产出交给模型之前抹掉 ──
+// 做成「抹掉」而不是「说话时检查」，依据是 probe-verbatim-leak 的实测：
+// 模型 3/3 会把内部信息说出去，整句逐字 0/3，其中一次连记号都没带、信息却全泄了。
+
+const BILL_TEXT = '账期=2026-08 金额=30元 _internal_note=风控标记R7-9931，建议不予受理'
+
+const NO_LEAK: ConstraintSpec = {
+  name: '内部批注不外泄',
+  type: 'no-leak',
+  tool: 'query_bill',
+  field: '_internal_note',
+  evals: {
+    deny: [BILL_TEXT],                       // 含该字段的产出必须被改写
+    allow: ['账期=2026-08 金额=30元'],        // 不含该字段的产出必须原样
+  },
+}
+
+const BILL_TOOL: ToolDefinition = {
+  name: 'query_bill', description: 'bill',
+  parameters: { type: 'object', properties: { account: { type: 'string' } } },
+  output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v as string }] },
+  execute: (): Promise<string> => Promise.resolve(BILL_TEXT),
+}
+
+async function callBill(ctx: Context): Promise<{ isError: boolean; text: string; hasValue: boolean }> {
+  const res = await ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: CallId(`c-${Math.floor(performance.now())}`),
+    name: 'query_bill', arguments: { account: 'A1' }, agent,
+  })
+  const f = res.content[0]
+  return {
+    isError: res.isError,
+    text: f?.type === 'text' ? f.text : '',
+    hasValue: (res as { value?: unknown }).value !== undefined,
+  }
+}
+
+describe('约束声明 · 内部字段不外泄', () => {
+  it('论证54 字段值在产出交给调用方之前就被抹掉', async () => {
+    const ctx = await boot()
+    ctx.tools.register(BILL_TOOL)
+    installToolGate(ctx, compileConstraints(ctx, [NO_LEAK]))
+    const r = await callBill(ctx)
+    expect(r.text).toContain('账期=2026-08')          // 正常业务信息保留
+    expect(r.text).toContain('_internal_note=***')
+    expect(r.text).not.toContain('R7-9931')
+    expect(r.text).not.toContain('不予受理')
+  })
+
+  it('论证55 原始返回值 value 也被去掉——留着等于脱敏没做', async () => {
+    const ctx = await boot()
+    ctx.tools.register(BILL_TOOL)
+    const before = await callBill(ctx)
+    expect(before.hasValue).toBe(true)                // 未挂约束时 value 在
+    const ctx2 = await boot()
+    ctx2.tools.register(BILL_TOOL)
+    installToolGate(ctx2, compileConstraints(ctx2, [NO_LEAK]))
+    expect((await callBill(ctx2)).hasValue).toBe(false)
+  })
+
+  it('论证56 只动声明的那个工具，别的工具产出不碰', async () => {
+    const ctx = await boot()
+    ctx.tools.register(BILL_TOOL)
+    ctx.tools.register({ ...BILL_TOOL, name: 'other_tool' })
+    installToolGate(ctx, compileConstraints(ctx, [NO_LEAK]))
+    const res = await ctx.tools.execute({
+      signal: new AbortController().signal, callId: CallId('c-other'),
+      name: 'other_tool', arguments: {}, agent,
+    })
+    const f = res.content[0]
+    expect(f?.type === 'text' && f.text).toContain('R7-9931')   // 没声明就不动
+  })
+
+  it('论证57 改写失败按拒绝整次调用处理——抹不掉不能放行', async () => {
+    const ctx = await boot()
+    ctx.tools.register(BILL_TOOL)
+    installToolGate(ctx, [{
+      name: '会炸的脱敏', postTool: (): string => { throw new Error('正则崩了') },
+    }])
+    const r = await callBill(ctx)
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('改写产出失败')
+    expect(r.text).not.toContain('R7-9931')          // 失败也不能把原文放出去
+  })
+
+  it('论证58 验收用例判的是产出不是说的话，通道对得上', async () => {
+    const ctx = await boot()
+    const rs = await checkSpecEvals(ctx, [NO_LEAK])
+    expect(rs[0]?.ok).toBe(true)
+    expect(rs[0]?.deny.caught).toBe(1)
+    expect(rs[0]?.allow.kept).toBe(1)
   })
 })

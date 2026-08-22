@@ -33,6 +33,7 @@
 | 13 | 两个语义插件挂一起会无限递归；判定放进网关则互不污染 | `FINDINGS-13-multiplugin-pollution.md` |
 | 14 | 热替换干净；但决策途中换版会让该次调用失败（方向是不放行），且 run 阶段换版失败会把旧约束带走 | `FINDINGS-14-hotswap.md` |
 | 15 | 模型调用失败不抛错而是发 error finish——插件词表兜底不执行、网关 fail-closed 被绕过 | `FINDINGS-15-silent-llm-failure.md` |
+| 16 | 网关挂错了地方：agent 不走 `execute` 走调度器；改写产出与拒绝在真实链路上各验 3/3 | `FINDINGS-16-real-mount-point.md` |
 
 **分层结论：写规矩，模型能；判自己写得对不对，现在不能；语义那部分，机制上够到边了，
 模型也会走，但它第一版有相当比例会把旧机制留在前门、收益自己抵消
@@ -104,6 +105,28 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
    公开集 9 条 + 留出集 6 条），实验 `a2-ab.ts`，门控消融 `a2-gate-ablation.ts`。
    HANDOFF 原先列的四条评测集支点全部按预期成立；判别力确实只来自留出集
    ——两个 arm 公开集都是第一轮 9/9。
+
+## 当前进行中：插件包与约束声明
+
+**铁律（全局）**：先试验，再实现。本轮已经因为跳过这一步栽了一次
+（`installToolGate` 挂在 `execute` 上，单测全过、真 agent 上一次都不触发）。
+
+已完成：
+- `packages/thymus/` 插件包骨架（双语 README、`dsh-plugin` 话题、版本兼容声明），
+  `gate.ts` 与 `eval-framework.ts` 已搬进去，包内零客户数据。
+- 约束的**声明形式**（`src/spec.ts`）：数据不是代码，三个内置类型
+  `forbidden-phrases` / `semantic-policy` / `no-leak`，每条自带验收用例
+  （`deny` / `allow` / `heldout`），`checkSpecEvals()` 逐条只挂它自己去判。
+- 环境两修：`demo/run.sh` 漏拷 `packages/thymus/src`；这台机器要走代理而 Node 的
+  fetch 默认不认 `HTTP_PROXY`，加 `--use-env-proxy`（不加时所有真模型调用全失败，
+  而失败的样子和「模型不泄露」一模一样）。
+
+**下一步（已探明，可以动手）**：把 `installToolGate` 从 `execute` 改挂到调度器
+（`prepare` 拒绝 + `finalize` 改写），同时保留 `execute` 的包装给外部调用方；
+拒绝结果补 `error` 字段（见发现 16，现在这个 bug 一挂上去就会炸）。
+说话侧改成挂 `llm/stream` waterfall、装配后裁决，不再自己 dispatch。
+
+之后：B 类（认人前置）——它要跨调用记状态，得先探状态挂在哪、多 agent 会不会串。
 
 ## 下一步
 

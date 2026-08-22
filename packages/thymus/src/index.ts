@@ -37,6 +37,7 @@ export {
   type ConstraintSpec,
   type EvalDeclaration,
   type ForbiddenPhrasesSpec,
+  type NoLeakSpec,
   type SemanticPolicySpec,
   type SpecEvalReport,
 } from './spec.ts'

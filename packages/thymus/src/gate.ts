@@ -44,10 +44,23 @@ export interface ToolCall {
   arguments: Record<string, unknown>
 }
 
-/** 一条约束。两个通道各自可选，只实现关心的那个。 */
+/** 一条约束。三个位置各自可选，只实现关心的那个。 */
 export interface Constraint {
   name: string
+  /** 派发之前裁决一次工具调用。 */
   preTool?: (call: ToolCall) => Verdict | Promise<Verdict>
+  /**
+   * 改写工具产出，在结果交回调用方**之前**生效——所以模型看到的就是改写后的。
+   *
+   * 这一手是实测逼出来的：模型复述工具产出时从不逐字，它会重组、会换说法，
+   * 甚至能把内部信息完整说出去而字面一个字都对不上。所以「说话时检查有没有
+   * 包含那个值」拦不住，只能让模型压根看不到。
+   *
+   * @returns 改写后的文本；返回 undefined 表示不改。抛错按拒绝整次调用处理——
+   *   抹不掉就不能放行。
+   */
+  postTool?: (call: ToolCall, text: string) => string | undefined | Promise<string | undefined>
+  /** 裁决一段要说给用户的话。 */
   say?: (text: string) => Verdict | Promise<Verdict>
 }
 
@@ -109,10 +122,41 @@ export function installToolGate(
   const inner = runtime.execute.bind(runtime)
   runtime.execute = async (call: never): Promise<ToolResult> => {
     const { name, arguments: args } = call as unknown as ToolCall
-    const verdict = await adjudicate(constraints, c => c.preTool?.({ name, arguments: args }), timeoutMs)
+    const toolCall: ToolCall = { name, arguments: args }
+    const verdict = await adjudicate(constraints, c => c.preTool?.(toolCall), timeoutMs)
     if (verdict.kind === 'deny') return { content: [{ type: 'text', text: verdict.reason }], isError: true }
-    return inner(call)
+    const result = await inner(call)
+    return rewriteResult(constraints, toolCall, result)
   }
+}
+
+/**
+ * 逐条约束改写工具产出。多条按声明顺序串联，后一条看到的是前一条改完的。
+ * 只有正常返回且首块是文本时才改——出错的结果没有可脱敏的产出。
+ */
+async function rewriteResult(
+  constraints: readonly Constraint[], call: ToolCall, result: ToolResult,
+): Promise<ToolResult> {
+  const first = result.content[0]
+  if (result.isError || first?.type !== 'text') return result
+  let text = first.text
+  for (const c of constraints) {
+    if (c.postTool === undefined) continue
+    try {
+      const next = await c.postTool(call, text)
+      if (typeof next === 'string') text = next
+    } catch (e) {
+      // 抹不掉就不能放行：脱敏失败留下的必须是拒绝，不是原文。
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `约束「${c.name}」改写产出失败：${e instanceof Error ? e.message : String(e)}` }],
+      }
+    }
+  }
+  if (text === first.text) return result
+  // value 是工具的原始返回值，改写后必须一并去掉——留着等于脱敏没做。
+  const { value: _dropped, ...rest } = result as ToolResult & { value?: unknown }
+  return { ...rest, content: [{ type: 'text', text }] }
 }
 
 /**

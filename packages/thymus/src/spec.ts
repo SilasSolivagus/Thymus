@@ -14,7 +14,7 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
-import { judgeText, type Constraint, type Verdict } from './gate.ts'
+import { judgeText, type Constraint, type ToolCall, type Verdict } from './gate.ts'
 
 /**
  * 一条约束的验收用例。三组各有分工，缺一组这条声明就不算写完。
@@ -59,8 +59,34 @@ export interface SemanticPolicySpec extends SpecBase {
   model: string
 }
 
+/**
+ * 内部字段不外泄：在工具产出交给模型**之前**把字段值抹掉。
+ *
+ * 为什么是抹掉而不是「说话时检查有没有说出去」——实测（`probe-verbatim-leak`）：
+ * 问到点子上时模型 3/3 会把内部信息说出去，但**整句逐字 0/3**，它每次都重组换说法，
+ * 其中一次连字段里的记号都没带、信息却全泄了。按值匹配在泄得最彻底的那次完全失灵。
+ *
+ * 代价要认：模型也真的用不了这条信息了。用户问到只能说查不到。
+ * 「允许模型看到、只是不许说出去」那条路要走语义判定，但那需要先验证判定器抓不抓得住
+ * 改写——没验之前不做。
+ */
+export interface NoLeakSpec extends SpecBase {
+  type: 'no-leak'
+  /** 哪个工具的产出。 */
+  tool: string
+  /** 字段名。产出里形如 `字段名=值`，抹掉的是等号后到下一个空格之前的部分。 */
+  field: string
+  /** 替换成什么，缺省 `***`。 */
+  replacement?: string
+  /**
+   * 验收用例这里判的是**工具产出**，不是说的话：
+   * `deny` 写抹除前的产出原文（必须被改写），`allow` 写不含该字段的产出（必须原样）。
+   */
+  evals?: EvalDeclaration
+}
+
 /** 一条约束声明。 */
-export type ConstraintSpec = ForbiddenPhrasesSpec | SemanticPolicySpec
+export type ConstraintSpec = ForbiddenPhrasesSpec | SemanticPolicySpec | NoLeakSpec
 
 /** 判定器的系统提示词。只陈述条款并要求二选一，不给它发挥空间。 */
 const JUDGE_SYSTEM = (policy: string): string => [
@@ -85,6 +111,16 @@ function compileOne(ctx: Context, spec: ConstraintSpec): Constraint {
           ? { kind: 'allow' }
           : { kind: 'deny', reason: `${spec.name}：命中禁语「${hit}」` }
       },
+    }
+  }
+  if (spec.type === 'no-leak') {
+    const replacement = spec.replacement ?? '***'
+    // 字段值到下一个空白为止。SOP 里的内部批注就是这个形状（`_internal_note=…`）。
+    const pattern = new RegExp(`${spec.field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=\\S*`, 'g')
+    return {
+      name: spec.name,
+      postTool: (call: ToolCall, text: string): string | undefined =>
+        call.name === spec.tool ? text.replace(pattern, `${spec.field}=${replacement}`) : undefined,
     }
   }
   return {
@@ -154,8 +190,14 @@ export async function checkSpecEvals(
   const reports: SpecEvalReport[] = []
   for (const spec of specs) {
     const only = compileConstraints(ctx, [spec])
-    const denied = async (text: string): Promise<boolean> =>
-      (await gateSay(ctx, text, only)).verdict.kind === 'deny'
+    // no-leak 判的是工具产出有没有被改写，不是说的话有没有被拦——通道不同，判据也不同。
+    const denied = spec.type === 'no-leak'
+      ? async (text: string): Promise<boolean> => {
+        const out = await only[0]!.postTool!({ name: spec.tool, arguments: {} }, text)
+        return typeof out === 'string' && out !== text
+      }
+      : async (text: string): Promise<boolean> =>
+        (await gateSay(ctx, text, only)).verdict.kind === 'deny'
 
     const d = spec.evals?.deny ?? []
     const a = spec.evals?.allow ?? []
