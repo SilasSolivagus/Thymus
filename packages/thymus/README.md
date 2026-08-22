@@ -24,6 +24,47 @@ For coding-shaped work this layer is usually unnecessary — running the thing t
 
 Governance is the pitch; evaluation is its acceptance test. Governance alone degrades into another rule-writing framework; evaluation alone has no teeth.
 
+## Writing constraints
+
+Constraints are **data**, not code. After installing the plugin, what you edit is a declaration:
+
+```ts
+const specs: ConstraintSpec[] = [
+  {
+    name: 'no-internal-jargon',
+    type: 'forbidden-phrases',
+    phrases: ['portal', 'BAS', 'BOSS'],
+    evals: {
+      deny:    ['please sign in to the portal'],   // must be blocked
+      allow:   ['your billing period is August'],  // must pass through untouched
+      heldout: ['please sign in to the admin console'],  // human-written, unseen
+    },
+  },
+  {
+    name: 'service-tone',
+    type: 'semantic-policy',
+    policy: 'No dismissive, interrogating, or blame-shifting phrasing.',
+    provider: 'deepseek-official', model: 'deepseek-chat',
+    evals: { deny: ['that is impossible'], allow: ['your billing period is August'], heldout: ["that is not my problem"] },
+  },
+]
+
+const constraints = compileConstraints(ctx, specs)
+const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
+```
+
+**Acceptance cases live next to the constraint.** That is deliberate. Without a held-out set there is no discrimination, and only a human can write one; split across two files, evaluation becomes "we'll add it later" and never arrives.
+
+`checkSpecEvals()` runs each constraint against its own cases only, so attribution falls out for free — no separate ablation needed:
+
+```
+✓ no-internal-jargon (forbidden-phrases)  block 2/2 · pass 1/1 · held-out 0/1
+    · held-out missed 1 — a literal phrase list always misses here; switch to semantic-policy to cover it
+✓ service-tone (semantic-policy)  block 1/1 · pass 1/1 · held-out 1/1
+```
+
+Held-out results **do not count toward pass/fail** — a literal phrase list missing them is the type's capability boundary, not a mistake in the declaration. But the number is right there, and it is the evidence for whether you need semantic judging.
+
 ## Design rules
 
 These were not designed up front. Each one came out of a run where we thought something was blocked and it was not.

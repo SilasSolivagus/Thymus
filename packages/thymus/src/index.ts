@@ -31,6 +31,17 @@ export {
 } from './gate.ts'
 
 export {
+  checkSpecEvals,
+  compileConstraints,
+  formatSpecEvalReports,
+  type ConstraintSpec,
+  type EvalDeclaration,
+  type ForbiddenPhrasesSpec,
+  type SemanticPolicySpec,
+  type SpecEvalReport,
+} from './spec.ts'
+
+export {
   checkEvalGradient,
   judgeCases,
   type EvalAssert,
