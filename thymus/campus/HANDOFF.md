@@ -136,6 +136,25 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 第一个候选是包住 `ctx.llm.stream` 这个服务方法本身（与包 `execute` 同形），
 用脚本化 adapter 就能测，不花钱。探明之前不要写 `installSayGate`。
 
+改完之后的验收，三条都要（工具侧的教训）：
+
+1. **端到端、真 agent、n≥3。** 单测全绿不算数——工具侧 107 个测试全过，
+   真 agent 上网关一次都没触发。
+2. **必须有阳性对照。** 没有对照的「0 次泄露」可能只是题太软。
+   参考 `probe-verbatim-leak.ts`：先证明无防护时真的会漏，再看加了之后归零。
+3. **必须做抢位测试。** 让一个动态插件在 `llm/stream` 上 `prepend` 一个把禁语塞回去的
+   handler，确认网关仍拦得住。这是说话侧与工具侧最不一样的地方，也是选错挂载点时
+   唯一会暴露的地方。
+
+别踩的坑（都已实测）：
+- 判定用的模型调用**必须走 `judgeText`**。直接 `for await ctx.llm.stream` 时失败不抛错，
+  它发 error finish 后正常结束，`try/catch` 不触发（发现 15）。
+- 拒绝结果**必须带 `error` 字段**，否则被判为有损序列化并抛错（发现 16）。
+- 真模型跑之前确认 `demo/run.sh` 里的 `--use-env-proxy` 还在。这台机器要走代理，
+  不加时所有调用失败，**而失败的样子和「模型很守规矩」一模一样**。
+- 先看 `packages/core/agent-loop/src/agent.ts` 怎么发起模型调用——agent-loop 可能
+  不直接调 `ctx.llm.stream`，就像它不调 `ctx.tools.execute` 一样。
+
 之后：B 类（认人前置）——它要跨调用记状态，得先探状态挂在哪、多 agent 会不会串。
 
 ## 下一步
