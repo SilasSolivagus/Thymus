@@ -1,17 +1,32 @@
 #!/usr/bin/env bash
-# Thymus 自己的测试。源码在 thymus/src/，但必须在 dsh workspace 里跑
-# （它 import dsh 的类型），所以临时拷进去、跑完撤走。
+# Thymus 的测试。源码 import dsh 的类型，必须在 dsh workspace 里跑——
+# 所以临时拷进去、跑完撤走。两处来源：
+#   packages/thymus/  插件包（要发布的那部分）
+#   thymus/           仍留在实验场的部分（judge / trajectory / turn 及其 spec）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DSH="$ROOT/vendor/deepseek-harness"
 DEST="$DSH/packages/extensions/cordis-host-runner/tests"
+REL="packages/extensions/cordis-host-runner/tests"
 
-cleanup() { rm -rf "$DEST/thymus-src" "$DEST/thymus-trajectory.spec.ts" "$DEST/thymus-recording.spec.ts" "$DEST/thymus-judge.spec.ts" "$DEST/thymus-eval-framework.spec.ts" "$DEST/thymus-composite.spec.ts" "$DEST/thymus-turn.spec.ts" "$DEST/thymus-speech-eval.spec.ts" "$DEST/thymus-gate.spec.ts" "$DEST/thymus-multiplugin.spec.ts" "$DEST/thymus-hotswap.spec.ts"; }
+# 拷进去的 spec 一律加 thymus- 前缀，撤走时按前缀清，不用逐个列。
+cleanup() { rm -rf "$DEST/thymus-src" "$DEST"/thymus-*.spec.ts; }
 trap cleanup EXIT
 
 mkdir -p "$DEST/thymus-src"
+cp "$ROOT"/packages/thymus/src/*.ts "$DEST/thymus-src/"
 cp "$ROOT"/thymus/src/*.ts "$DEST/thymus-src/"
-cp "$ROOT/thymus/thymus-trajectory.spec.ts" "$ROOT/thymus/thymus-recording.spec.ts" "$ROOT/thymus/thymus-judge.spec.ts" "$ROOT/thymus/thymus-eval-framework.spec.ts" "$ROOT/thymus/thymus-composite.spec.ts" "$ROOT/thymus/thymus-speech-eval.spec.ts" "$ROOT/thymus/thymus-turn.spec.ts" "$ROOT/thymus/thymus-gate.spec.ts" "$ROOT/thymus/thymus-multiplugin.spec.ts" "$ROOT/thymus/thymus-hotswap.spec.ts" "$DEST/"
+
+specs=()
+for f in "$ROOT"/packages/thymus/tests/*.spec.ts; do
+  cp "$f" "$DEST/thymus-$(basename "$f")"
+  specs+=("$REL/thymus-$(basename "$f")")
+done
+for f in "$ROOT"/thymus/thymus-*.spec.ts; do
+  cp "$f" "$DEST/"
+  specs+=("$REL/$(basename "$f")")
+done
+
 cd "$DSH"
-CI=true corepack pnpm vitest run packages/extensions/cordis-host-runner/tests/thymus-trajectory.spec.ts packages/extensions/cordis-host-runner/tests/thymus-recording.spec.ts packages/extensions/cordis-host-runner/tests/thymus-judge.spec.ts packages/extensions/cordis-host-runner/tests/thymus-eval-framework.spec.ts packages/extensions/cordis-host-runner/tests/thymus-composite.spec.ts packages/extensions/cordis-host-runner/tests/thymus-turn.spec.ts packages/extensions/cordis-host-runner/tests/thymus-speech-eval.spec.ts packages/extensions/cordis-host-runner/tests/thymus-gate.spec.ts packages/extensions/cordis-host-runner/tests/thymus-multiplugin.spec.ts packages/extensions/cordis-host-runner/tests/thymus-hotswap.spec.ts
+CI=true corepack pnpm vitest run "${specs[@]}"
