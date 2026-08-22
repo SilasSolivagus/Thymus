@@ -47,6 +47,17 @@ const specs: ConstraintSpec[] = [
     provider: 'deepseek-official', model: 'deepseek-chat',
     evals: { deny: ['这个不可能'], allow: ['已为您核实，账期是8月。'], heldout: ['这事我管不了'] },
   },
+  {
+    name: '认人前置',
+    type: 'require-before',
+    requires: 'verify_identity',   // 它必须在本会话里**成功**调用过
+    unguarded: ['greet'],          // 其余一律受管——白名单，不是黑名单
+    evals: {                       // 这一类的用例是序列，不是句子
+      deny:    [{ before: [], call: 'query_bill' }],
+      allow:   [{ before: ['verify_identity'], call: 'query_bill' }],
+      heldout: [{ before: [], call: 'export_invoice' }],  // 声明里没提过——照样受管
+    },
+  },
 ]
 
 const constraints = compileConstraints(ctx, specs)
@@ -58,6 +69,12 @@ const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
 installToolGate(ctx, constraints)
 installSayGate(ctx, constraints, '抱歉，这个问题我需要转人工为您处理。')
 ```
+
+`require-before` 按白名单写：列的是**不需要**前置的工具，其余一律受管。反过来按名字列
+受管工具是黑名单，有已确证的缺口——而它自己的留出集就是照出这个缺口的镜子：声明里没提过
+的同功能工具会直接放行。它的验收用例是序列（`before` 是本会话里已经**成功**调用过的工具），
+所以核验失败自然不进这个集合。覆盖边界要知道：这些用例直接构造调用方身份，
+**不覆盖「从会话事件日志解析事实」那一层**，那一层由真 agent 的测试盯着。
 
 要跨调用记事的约束——「没认人之前不许查账单」这一类——在 `preTool` 里读 `call.caller`：
 会话身份加那个会话的事件日志。判定仍是日志的纯函数，没有自己那份副本，也就没有漂移。

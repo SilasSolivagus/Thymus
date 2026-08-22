@@ -14,7 +14,7 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
-import { judgeText, type Constraint, type ToolCall, type Verdict } from './gate.ts'
+import { judgeText, type Caller, type Constraint, type ToolCall, type Verdict } from './gate.ts'
 
 /**
  * 一条约束的验收用例。三组各有分工，缺一组这条声明就不算写完。
@@ -34,7 +34,6 @@ export interface EvalDeclaration {
 interface SpecBase {
   /** 归因用的名字，会出现在拒绝理由里。 */
   name: string
-  evals?: EvalDeclaration
 }
 
 /** 字面禁语：产出里不得出现这些说法。对应 SOP 里能精确列举的那一类。 */
@@ -43,6 +42,7 @@ export interface ForbiddenPhrasesSpec extends SpecBase {
   phrases: string[]
   /** 大小写归一化后再比对，缺省开。SOP 里的内部术语常有大小写变体。 */
   ignoreCase?: boolean
+  evals?: EvalDeclaration
 }
 
 /**
@@ -57,6 +57,7 @@ export interface SemanticPolicySpec extends SpecBase {
   policy: string
   provider: string
   model: string
+  evals?: EvalDeclaration
 }
 
 /**
@@ -85,8 +86,62 @@ export interface NoLeakSpec extends SpecBase {
   evals?: EvalDeclaration
 }
 
+/**
+ * B 类的一条验收用例：**先成功调用过什么，然后调什么**。
+ *
+ * `before` 是成功调用过的工具集合，顺序无关——失败的调用不进这个集合，
+ * 所以「核验失败不算认过人」自动成立，不用另外表达。
+ */
+export interface SequenceCase {
+  /** 在这次调用之前已经成功调用过的工具。 */
+  before: string[]
+  /** 这一次要调用的工具。 */
+  call: string
+}
+
+/** B 类的验收用例。三组分工与 {@link EvalDeclaration} 相同，只是每条是一个序列。 */
+export interface SequenceEvalDeclaration {
+  /** 必须被拦住的序列。 */
+  deny?: SequenceCase[]
+  /** 必须放行的序列。 */
+  allow?: SequenceCase[]
+  /**
+   * 留出用例：**SPEC 没列出、但同类**的工具。
+   *
+   * 判别的是「按名字列受管工具」这种黑名单写法的固有缺口——插件注册一个同功能新名字
+   * 就绕过（架构结论 4）。本类型用白名单写（`unguarded` 之外一律受管），
+   * 所以这一组**应当通过**；通不过就说明 `unguarded` 列宽了。
+   */
+  heldout?: SequenceCase[]
+}
+
+/**
+ * 前置条件：某个工具在本会话里成功调用过之后，才允许调用受管工具。
+ * 对应 SOP 里「认人前置」那一类。
+ *
+ * **按白名单写**：列的是不需要前置的工具（`unguarded`），其余一律受管。
+ * 反过来按名字列受管工具是黑名单，新工具默认在管辖之外——那是已确证的缺口
+ * （架构结论 4）。代价是加一个无害的新工具也要先认人，方向是 fail-closed。
+ *
+ * 事实从会话事件日志取（`call.caller.succeeded`），不自己存一份状态，
+ * 也就没有「自己那份和会话不一致」的漂移（发现 18）。
+ */
+export interface RequireBeforeSpec extends SpecBase {
+  type: 'require-before'
+  /** 前置工具：它在本会话里成功调用过，受管工具才放行。 */
+  requires: string
+  /**
+   * 不需要前置的工具。`requires` 自己总是不需要——否则它永远调不起来，
+   * 前置条件也就永远满足不了。
+   */
+  unguarded?: string[]
+  /** 拒绝时告诉模型的话，缺省是一句通用的。 */
+  reason?: string
+  evals?: SequenceEvalDeclaration
+}
+
 /** 一条约束声明。 */
-export type ConstraintSpec = ForbiddenPhrasesSpec | SemanticPolicySpec | NoLeakSpec
+export type ConstraintSpec = ForbiddenPhrasesSpec | SemanticPolicySpec | NoLeakSpec | RequireBeforeSpec
 
 /** 判定器的系统提示词。只陈述条款并要求二选一，不给它发挥空间。 */
 const JUDGE_SYSTEM = (policy: string): string => [
@@ -110,6 +165,24 @@ function compileOne(ctx: Context, spec: ConstraintSpec): Constraint {
         return hit === undefined
           ? { kind: 'allow' }
           : { kind: 'deny', reason: `${spec.name}：命中禁语「${hit}」` }
+      },
+    }
+  }
+  if (spec.type === 'require-before') {
+    // requires 自己必须放行：受管的话它永远调不起来，前置条件也就永远满足不了。
+    const unguarded = new Set([...spec.unguarded ?? [], spec.requires])
+    const reason = spec.reason ?? `本次会话尚未完成「${spec.requires}」，不能调用该工具`
+    return {
+      name: spec.name,
+      preTool: (call: ToolCall): Verdict => {
+        if (unguarded.has(call.name)) return { kind: 'allow' }
+        // 没有身份和「有身份但没记录」是两回事，理由要分得开——但都不放行。
+        if (call.caller === undefined) {
+          return { kind: 'deny', reason: `${spec.name}：这次调用没有身份，确认不了前置条件` }
+        }
+        return call.caller.succeeded.has(spec.requires)
+          ? { kind: 'allow' }
+          : { kind: 'deny', reason: `${spec.name}：${reason}` }
       },
     }
   }
@@ -174,10 +247,75 @@ export interface SpecEvalReport {
   ok: boolean
 }
 
+/** 一条验收用例：一个人看得懂的标签，加一个「这条被拦住了吗」的判定。 */
+interface EvalProbe {
+  label: string
+  denied: () => Promise<boolean>
+}
+
+/** B 类用例的标签：`认人+查单 → 导发票`，未认人时左边写清楚。 */
+function sequenceLabel(c: SequenceCase): string {
+  return `${c.before.length === 0 ? '（无前置）' : c.before.join('+')} → ${c.call}`
+}
+
+/**
+ * 把一条声明的三组用例摊成统一的探针。
+ *
+ * 三种类型判的通道不同：说话类判 `gateSay`，`no-leak` 判工具产出有没有被改写，
+ * `require-before` 判这次调用放不放行。
+ */
+function probesOf(
+  ctx: Context, spec: ConstraintSpec, only: Constraint,
+): { deny: EvalProbe[]; allow: EvalProbe[]; heldout: EvalProbe[] } {
+  if (spec.type === 'require-before') {
+    // 直接构造 caller：**不伪造会话事件**。伪造的形状和 gate.ts 的解析可能一起写错、
+    // 互相掩盖（发现 18 就是这么栽的）。解析那一层由 gate.spec 的真 agent 测试盯着，
+    // 这里只判这条声明的逻辑。代价明说：spec 全绿不等于端到端全绿。
+    const probe = (c: SequenceCase): EvalProbe => ({
+      label: sequenceLabel(c),
+      denied: async (): Promise<boolean> => {
+        const caller: Caller = { sessionId: 'spec-eval', events: [], succeeded: new Set(c.before) }
+        const v = await only.preTool!({ name: c.call, arguments: {}, caller })
+        return v.kind === 'deny'
+      },
+    })
+    const e = spec.evals
+    return {
+      deny: (e?.deny ?? []).map(probe),
+      allow: (e?.allow ?? []).map(probe),
+      heldout: (e?.heldout ?? []).map(probe),
+    }
+  }
+  const denied = spec.type === 'no-leak'
+    ? async (text: string): Promise<boolean> => {
+      const out = await only.postTool!({ name: spec.tool, arguments: {} }, text)
+      return typeof out === 'string' && out !== text
+    }
+    : async (text: string): Promise<boolean> =>
+      (await gateSayOf(ctx, text, only)).kind === 'deny'
+  const probe = (text: string): EvalProbe => ({ label: text, denied: () => denied(text) })
+  const e = spec.evals
+  return {
+    deny: (e?.deny ?? []).map(probe),
+    allow: (e?.allow ?? []).map(probe),
+    heldout: (e?.heldout ?? []).map(probe),
+  }
+}
+
+/** 说话通道的判定。动态 import 是为了不和 gate.ts 形成加载期循环。 */
+async function gateSayOf(ctx: Context, text: string, only: Constraint): Promise<Verdict> {
+  const { gateSay } = await import('./gate.ts')
+  return (await gateSay(ctx, text, [only])).verdict
+}
+
 /**
  * 逐条约束跑它自己声明的验收用例。
  *
  * 每条只挂**它自己**去判，所以哪条约束负责哪些保证是天然分清的——不需要另做消融。
+ *
+ * 注意 `require-before` 这一类的覆盖边界：它的用例直接构造调用方身份，
+ * **不覆盖「从会话事件解析出成功调用过哪些工具」那一层**。那一层由真 agent 的
+ * 测试盯着。这里全绿只说明声明本身写对了。
  *
  * @param ctx - 宿主 context。
  * @param specs - 约束声明。
@@ -186,28 +324,17 @@ export interface SpecEvalReport {
 export async function checkSpecEvals(
   ctx: Context, specs: readonly ConstraintSpec[],
 ): Promise<SpecEvalReport[]> {
-  const { gateSay } = await import('./gate.ts')
   const reports: SpecEvalReport[] = []
   for (const spec of specs) {
-    const only = compileConstraints(ctx, [spec])
-    // no-leak 判的是工具产出有没有被改写，不是说的话有没有被拦——通道不同，判据也不同。
-    const denied = spec.type === 'no-leak'
-      ? async (text: string): Promise<boolean> => {
-        const out = await only[0]!.postTool!({ name: spec.tool, arguments: {} }, text)
-        return typeof out === 'string' && out !== text
-      }
-      : async (text: string): Promise<boolean> =>
-        (await gateSay(ctx, text, only)).verdict.kind === 'deny'
+    const only = compileConstraints(ctx, [spec])[0]!
+    const { deny: d, allow: a, heldout: h } = probesOf(ctx, spec, only)
 
-    const d = spec.evals?.deny ?? []
-    const a = spec.evals?.allow ?? []
-    const h = spec.evals?.heldout ?? []
     const missed: string[] = []
-    for (const t of d) if (!await denied(t)) missed.push(t)
+    for (const p of d) if (!await p.denied()) missed.push(p.label)
     const overreached: string[] = []
-    for (const t of a) if (await denied(t)) overreached.push(t)
+    for (const p of a) if (await p.denied()) overreached.push(p.label)
     const heldoutMissed: string[] = []
-    for (const t of h) if (!await denied(t)) heldoutMissed.push(t)
+    for (const p of h) if (!await p.denied()) heldoutMissed.push(p.label)
 
     reports.push({
       name: spec.name, type: spec.type,
@@ -234,7 +361,8 @@ export function formatSpecEvalReports(reports: readonly SpecEvalReport[]): strin
     for (const t of r.allow.overreached) notes.push(`    ✗ 误拦：${t}`)
     if (r.heldout.total > 0 && r.heldout.missed.length > 0) {
       notes.push(`    · 留出漏 ${r.heldout.missed.length} 条`
-        + `${r.type === 'forbidden-phrases' ? '——字面词表在留出集上必漏，要覆盖得换语义判定' : ''}`)
+        + `${r.type === 'forbidden-phrases' ? '——字面词表在留出集上必漏，要覆盖得换语义判定' : ''}`
+        + `${r.type === 'require-before' ? '——没列出的同类工具没被管住，检查 unguarded 是不是列宽了' : ''}`)
     }
     return [head, ...notes].join('\n')
   })

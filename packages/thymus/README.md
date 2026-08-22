@@ -47,6 +47,17 @@ const specs: ConstraintSpec[] = [
     provider: 'deepseek-official', model: 'deepseek-chat',
     evals: { deny: ['that is impossible'], allow: ['your billing period is August'], heldout: ["that is not my problem"] },
   },
+  {
+    name: 'verify-first',
+    type: 'require-before',
+    requires: 'verify_identity',   // must have SUCCEEDED earlier in this session
+    unguarded: ['greet'],          // everything else needs it — an allowlist, not a denylist
+    evals: {                       // this type's cases are sequences, not sentences
+      deny:    [{ before: [], call: 'query_bill' }],
+      allow:   [{ before: ['verify_identity'], call: 'query_bill' }],
+      heldout: [{ before: [], call: 'export_invoice' }],  // never named in the spec — still guarded
+    },
+  },
 ]
 
 const constraints = compileConstraints(ctx, specs)
@@ -58,6 +69,15 @@ const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
 installToolGate(ctx, constraints)
 installSayGate(ctx, constraints, 'Sorry — let me hand this to a human colleague.')
 ```
+
+`require-before` is written as an allowlist: you list what does NOT need the prerequisite,
+and everything else does. The reverse — listing the guarded tools by name — is a denylist
+with a demonstrated gap, and its own held-out cases are what expose it: a same-purpose tool
+the spec never named slips straight through. Its acceptance cases are sequences (`before`
+is the set of tools that already SUCCEEDED this session), so a failed verification simply
+never enters the set. Note the coverage boundary: these cases construct the caller directly,
+so they do NOT cover parsing facts out of the session event log — that layer is held by the
+real-agent tests.
 
 A constraint that needs cross-call state — "no billing lookup before the caller is
 verified" — reads `call.caller` in `preTool`: the session id plus that session's event

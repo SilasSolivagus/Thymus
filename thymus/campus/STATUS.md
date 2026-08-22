@@ -3,7 +3,7 @@
 19 份 FINDINGS 里有若干条已被后来的实验推翻或降级。**只读某一份会踩到作废的结论**，
 所以先读这份，再按需要跳转。
 
-最后更新：验完压缩对 B 类事实源的影响之后。测试 `./thymus/run-tests.sh` 应为 11 files / 130 passed。
+最后更新：验完压缩对 B 类事实源的影响之后。测试 `./thymus/run-tests.sh` 应为 11 files / 138 passed。
 
 ---
 
@@ -56,10 +56,12 @@
     **从事件日志读，不要从 surface 读**：压缩与剪枝都只动 surface、日志只增不减，
     换宿主 resume 之后事实照样在（19）。身份走 `ToolCall.caller`（sessionId + 事件日志）；
     它**可能为空**（外部调用方不带 agent），那时按会话记事的约束应当拒绝——
-    「没有身份」和「有身份但没记录」要分得开（论证81）。
+    「没有身份」和「有身份但没记录」要分得开（论证81）。声明形式是 `require-before`，
+    **按白名单写**（列不需要前置的工具，其余一律受管）——按名字列受管工具是黑名单，
+    留出集会照出那个缺口（论证88 是它的阳性对照）。
 
-代码：`packages/thymus/src/gate.ts`（441 行），`packages/thymus/src/eval-framework.ts`（328 行），
-`packages/thymus/src/spec.ts`（242 行）。
+代码：`packages/thymus/src/gate.ts`（489 行），`packages/thymus/src/eval-framework.ts`（328 行），
+`packages/thymus/src/spec.ts`（370 行）。
 
 ---
 
@@ -111,6 +113,9 @@
 - 公开集（断言 SPEC 明示词）**零判别力**——每一轮实验两臂都是 9/9。判别力全在留出集，
   而留出集只有人写得出来：出题 agent 看到的也只有 SPEC（05）。
 - 梯度体检 `checkEvalGradient`：负向断言在空插件组下每条都必须垮，垮不掉是死用例。
+- B 类的验收用例是序列（`{before, call}`），且**直接构造调用方身份、不伪造会话事件**——
+  伪造的形状和解析可能一起写错、互相掩盖。解析那一层由真 agent 的测试盯着，
+  所以 spec 全绿不等于端到端全绿，这句写进了 `checkSpecEvals` 的文档。
 - 回归集要用 `said-equals` 不是 `said-includes`——后者只判「原文还在里面」，
   加前缀的插件照样过。
 - 耗时是最锋利的诊断信号之一：「未问模型」（3–5ms vs 真调用 0.8–1.6s）是唯一能一眼
@@ -193,7 +198,7 @@
 
 ## 运行方式
 
-- 测试：`./thymus/run-tests.sh`（11 files / 130 passed）
+- 测试：`./thymus/run-tests.sh`（11 files / 138 passed）
 - 探针与实验：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
 - 花钱的脚本：`a2-ab` / `a2-feedback` / `a2-jspace` / `check-llm-optin` / `check-intact-damage`
 - 不花钱的：`check-a2-gradient` / `probe-selfunload` / `probe-protected-layer` /

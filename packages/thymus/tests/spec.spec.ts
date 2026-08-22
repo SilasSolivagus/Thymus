@@ -12,7 +12,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { gateSay, installToolGate } from './thymus-src/gate.ts'
+import { gateSay, installToolGate, type Constraint } from './thymus-src/gate.ts'
 import {
   checkSpecEvals, compileConstraints, formatSpecEvalReports, type ConstraintSpec,
 } from './thymus-src/spec.ts'
@@ -255,5 +255,99 @@ describe('约束声明 · 内部字段不外泄', () => {
     expect(rs[0]?.ok).toBe(true)
     expect(rs[0]?.deny.caught).toBe(1)
     expect(rs[0]?.allow.kept).toBe(1)
+  })
+})
+
+// ── B 类：认人前置 ──
+// 事实从 caller.succeeded 取（gate.ts 从会话事件日志解析）；这里的用例直接构造身份，
+// 不伪造事件——伪造的形状和解析可能一起写错、互相掩盖（发现 18）。
+// 解析那一层由 gate.spec.ts 论证78 的真 agent 测试盯着。
+
+const VERIFY_FIRST: ConstraintSpec = {
+  name: '认人前置',
+  type: 'require-before',
+  requires: 'verify_identity',
+  unguarded: ['greet'],
+  evals: {
+    deny: [{ before: [], call: 'query_bill' }],
+    allow: [{ before: ['verify_identity'], call: 'query_bill' }, { before: [], call: 'greet' }],
+    // SPEC 没列出、但同类的工具：白名单写法下它默认受管，这一组应当通过
+    heldout: [{ before: [], call: 'export_invoice' }],
+  },
+}
+
+/** 构造一次带身份的调用。 */
+const callAs = (call: string, before: string[]): Parameters<NonNullable<Constraint['preTool']>>[0] => ({
+  name: call, arguments: {},
+  caller: { sessionId: 's', events: [], succeeded: new Set(before) },
+})
+
+describe('约束声明 · B 类认人前置', () => {
+  it('论证82 没认人拒绝、认过人放行，理由带约束名', async () => {
+    const ctx = await boot()
+    const [c] = compileConstraints(ctx, [VERIFY_FIRST])
+    const denied = await c!.preTool!(callAs('query_bill', []))
+    expect(denied.kind).toBe('deny')
+    expect(denied.kind === 'deny' && denied.reason).toContain('认人前置')
+    expect(denied.kind === 'deny' && denied.reason).toContain('verify_identity')
+    expect((await c!.preTool!(callAs('query_bill', ['verify_identity']))).kind).toBe('allow')
+  })
+
+  it('论证83 白名单：没列出的工具默认受管，不是默认放行', async () => {
+    const ctx = await boot()
+    const [c] = compileConstraints(ctx, [VERIFY_FIRST])
+    // export_invoice 声明里一个字都没提，仍然要求先认人
+    expect((await c!.preTool!(callAs('export_invoice', []))).kind).toBe('deny')
+    expect((await c!.preTool!(callAs('export_invoice', ['verify_identity']))).kind).toBe('allow')
+    // unguarded 里列了的才免
+    expect((await c!.preTool!(callAs('greet', []))).kind).toBe('allow')
+  })
+
+  it('论证84 前置工具自己永远免管——否则它调不起来，前置条件永远满足不了', async () => {
+    const ctx = await boot()
+    // 故意不把 verify_identity 写进 unguarded
+    const [c] = compileConstraints(ctx, [{ ...VERIFY_FIRST, unguarded: [] } as ConstraintSpec])
+    expect((await c!.preTool!(callAs('verify_identity', []))).kind).toBe('allow')
+  })
+
+  it('论证85 失败的核验不算数：succeeded 只收成功的调用', async () => {
+    const ctx = await boot()
+    const [c] = compileConstraints(ctx, [VERIFY_FIRST])
+    // 调用失败时 gate.ts 不会把它放进 succeeded，这里等价于集合里没有它
+    expect((await c!.preTool!(callAs('query_bill', ['some_other_tool']))).kind).toBe('deny')
+  })
+
+  it('论证86 没有身份也不放行，且理由与「没认人」分得开', async () => {
+    const ctx = await boot()
+    const [c] = compileConstraints(ctx, [VERIFY_FIRST])
+    const v = await c!.preTool!({ name: 'query_bill', arguments: {} })
+    expect(v.kind).toBe('deny')
+    expect(v.kind === 'deny' && v.reason).toContain('没有身份')
+  })
+
+  it('论证87 验收用例跑得起来：三组各归各的，留出集在白名单写法下通过', async () => {
+    const ctx = await boot()
+    const [r] = await checkSpecEvals(ctx, [VERIFY_FIRST])
+    expect(r!.ok).toBe(true)
+    expect(r!.deny).toMatchObject({ caught: 1, total: 1 })
+    expect(r!.allow).toMatchObject({ kept: 2, total: 2 })
+    expect(r!.heldout).toMatchObject({ caught: 1, total: 1 })
+  })
+
+  it('论证88 阳性对照：unguarded 列宽了，留出集立刻掉下来', async () => {
+    const ctx = await boot()
+    // 把没列出的同类工具也免管——这正是黑名单写法的等价物
+    const wide: ConstraintSpec = { ...VERIFY_FIRST, unguarded: ['greet', 'export_invoice'] } as ConstraintSpec
+    const [r] = await checkSpecEvals(ctx, [wide])
+    expect(r!.ok).toBe(true)                       // 必拦、必放两组仍然全过
+    expect(r!.heldout).toMatchObject({ caught: 0, total: 1 })  // ← 判别力只在留出集
+    expect(formatSpecEvalReports([r!])).toContain('unguarded 是不是列宽了')
+  })
+
+  it('论证89 用例标签认得出是哪一条序列', async () => {
+    const ctx = await boot()
+    const broken: ConstraintSpec = { ...VERIFY_FIRST, unguarded: ['greet', 'query_bill'] } as ConstraintSpec
+    const [r] = await checkSpecEvals(ctx, [broken])
+    expect(r!.deny.missed).toEqual(['（无前置） → query_bill'])
   })
 })

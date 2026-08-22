@@ -60,8 +60,14 @@ function isVerdict(v: unknown): v is Verdict {
 export interface Caller {
   /** 会话身份，与 `agent.id` 同值。 */
   sessionId: string
-  /** 这个会话到此刻为止的事件日志。 */
+  /** 这个会话到此刻为止的事件日志。手写约束要问日志里别的事实时用它。 */
   events: readonly SessionEvent[]
+  /**
+   * 本会话里**成功调用过**的工具名。声明式约束只看这个，不自己解析事件——
+   * 解析写两遍就会有两处一起写错、互相掩盖的机会（发现 18 栽过一次）。
+   * 首次读取时才解析。
+   */
+  readonly succeeded: ReadonlySet<string>
 }
 
 /** 一次工具调用里裁决者看得到的部分。 */
@@ -158,6 +164,48 @@ interface ExecutionView {
 }
 
 /**
+ * 从事件日志里解析出「本会话成功调用过哪些工具」。
+ *
+ * 名字只在 `tool/call` 上，成败只在 `tool/result` 的结果块上，两者按 callId 对上。
+ * 这个形状是从真会话 dump 出来的，不是按印象写的（发现 18）。
+ * 读日志而不是读当前 surface：压缩只替换 surface、工具结果剪枝是追加一条盖上去，
+ * 日志两边都只增不减（发现 19）。剪枝后同一个 callId 会有两条结果，Set 自然去重。
+ */
+function succeededTools(events: readonly SessionEvent[]): ReadonlySet<string> {
+  const names = new Map<string, string>()
+  const done = new Set<string>()
+  for (const ev of events) {
+    const e = ev as { type?: string; data?: Record<string, unknown> }
+    if (e.type === 'tool/call') {
+      const { name, callId } = e.data ?? {}
+      if (typeof name === 'string' && callId !== undefined) names.set(String(callId), name)
+      continue
+    }
+    if (e.type !== 'tool/result') continue
+    const blocks = (e.data?.message as { content?: { type?: string; toolCallId?: string; isError?: boolean }[] } | undefined)?.content ?? []
+    for (const b of blocks) {
+      if (b.type !== 'tool-result' || b.toolCallId === undefined || b.isError === true) continue
+      const name = names.get(String(b.toolCallId))
+      if (name !== undefined) done.add(name)
+    }
+  }
+  return done
+}
+
+/** 造一个 {@link Caller}；`succeeded` 到用的时候才解析。 */
+function callerOf(id: string, events: readonly SessionEvent[]): Caller {
+  let cached: ReadonlySet<string> | undefined
+  return {
+    sessionId: id,
+    events,
+    get succeeded(): ReadonlySet<string> {
+      cached ??= succeededTools(events)
+      return cached
+    },
+  }
+}
+
+/**
  * 从一次执行里取裁决者看得到的部分。
  *
  * 身份来自 `exec.agent`：调度器路径上 agent-loop 会填好它，`agent.id` 就是 sessionId，
@@ -173,7 +221,7 @@ function toolCallOf(exec: ExecutionView): ToolCall {
   const id = exec.agent?.id
   const events = exec.agent?.session?.events
   if (id === undefined || events === undefined) return call
-  return { ...call, caller: { sessionId: id, events } }
+  return { ...call, caller: callerOf(id, events) }
 }
 
 /**

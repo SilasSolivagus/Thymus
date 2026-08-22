@@ -41,7 +41,10 @@ export {
   type EvalDeclaration,
   type ForbiddenPhrasesSpec,
   type NoLeakSpec,
+  type RequireBeforeSpec,
   type SemanticPolicySpec,
+  type SequenceCase,
+  type SequenceEvalDeclaration,
   type SpecEvalReport,
 } from './spec.ts'
 
