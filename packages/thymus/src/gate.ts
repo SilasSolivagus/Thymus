@@ -14,8 +14,10 @@
  *               `ctx.tools.execute`。真 agent 走的是调度器，`execute` 一次都不响，
  *               只服务外部调用方（发现 16）。链上的 handler 在 `prepare` 内部跑，
  *               它们再怎么抢位、返回什么，都要等这一层裁完才算数。
- *   说话通道 —— 先跑完整条 `llm/stream` waterfall 并装配，再对**装配后的文本**裁决。
- *               链内插件能改写文本，但改不掉「装配完还要过一道」这件事。
+ *   说话通道 —— 包住 `ctx.llm.prepareCall`：整条流收完、装配，再对**装配后的文本**裁决。
+ *               `llm/stream` 的 waterfall 在这一层里面跑完，链内插件能改写文本，
+ *               但改不掉「装配完还要过一道」这件事。agent 走的是
+ *               `preparedCall.stream()`，`ctx.llm.stream` 一次都不响（发现 17）。
  *
  * 约束在这里是宿主侧的普通对象，不经 DynamicCordisRunner——所以也不在动态注册表里，
  * `listPlugins` 看不到、`stop` 够不着（发现 09 组二已实测）。
@@ -24,17 +26,20 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, PreparedLlmCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
-import type {
-  ScheduledToolPreparation, ToolExecutionInput, ToolExecutionResult, ToolRunContext,
-} from '@deepseek-ai/dsh-tools'
 
 /** 一条判决。没有 `ask`——这一层只做确定性裁决，要人介入是上层的事。 */
 export type Verdict = { kind: 'allow' } | { kind: 'deny'; reason: string }
 
+/** 说话通道分两条：说给用户看的正文，和模型的思考块。 */
+export type SayChannel = 'text' | 'reasoning'
+
 /** 一条约束多久不给判决就按 deny 计。挂住的约束不能变成放行。 */
 export const DEFAULT_VERDICT_TIMEOUT_MS = 10_000
+
+/** 复用的放行判决。 */
+const ALLOW: Verdict = { kind: 'allow' }
 
 /** 判决形状校验：不是这两种形状的一律不认。 */
 function isVerdict(v: unknown): v is Verdict {
@@ -66,8 +71,13 @@ export interface Constraint {
    *   抹不掉就不能放行。
    */
   postTool?: (call: ToolCall, text: string) => string | undefined | Promise<string | undefined>
-  /** 裁决一段要说给用户的话。 */
-  say?: (text: string) => Verdict | Promise<Verdict>
+  /**
+   * 裁决一段要说给用户的话。
+   *
+   * `channel` 区分正文与思考块，两条**分开送来、各判一次**：拼成一段判，判定器拿到的是
+   * 两段性质不同的文本粘在一起（发现 17 第五节）。只判正文则禁语会从思考块原样漏出。
+   */
+  say?: (text: string, channel: SayChannel) => Verdict | Promise<Verdict>
 }
 
 /**
@@ -124,21 +134,6 @@ interface ToolResult {
  */
 function denyResult(reason: string): ToolResult {
   return { isError: true, error: { message: reason }, content: [{ type: 'text', text: reason }] }
-}
-
-/** 调度器视图上这一层要包的两个方法。dsh 把它标了 `@internal`，跨版本要重新核对。 */
-interface SchedulerView {
-  prepare(exec: ToolExecutionInput): Promise<ScheduledToolPreparation>
-  finalize(exec: ToolRunContext, result: ToolExecutionResult): Promise<ToolExecutionResult>
-}
-
-/** 从一次执行输入里取裁决者看得到的部分。`arguments` 在 dsh 那边是 `unknown`。 */
-function toolCallOf(exec: { name: string; arguments: unknown }): ToolCall {
-  const args = exec.arguments
-  return {
-    name: exec.name,
-    arguments: typeof args === 'object' && args !== null ? args as Record<string, unknown> : {},
-  }
 }
 
 /**
@@ -284,5 +279,113 @@ export async function gateSay(
   const assembler = new BlockAssembler()
   for await (const chunk of stream) assembler.push(chunk)
   const assembled = assembler.blocks().filter(b => b.type === 'text').map(b => b.text).join('')
-  return { verdict: await adjudicate(constraints, c => c.say?.(assembled), timeoutMs), assembled }
+  return { verdict: await adjudicate(constraints, c => c.say?.(assembled, 'text'), timeoutMs), assembled }
+}
+
+/** 一个 chunk 属于哪种块。`usage` / `finish` 不属于任何块。 */
+function channelOf(chunk: StreamChunk): string | undefined {
+  switch (chunk.type) {
+    case 'block-start': return chunk.blockType
+    case 'text-delta': return 'text'
+    case 'reasoning-delta': return 'reasoning'
+    case 'tool-call-delta': return 'tool-call'
+    case 'block-end': return chunk.block.type
+    default: return undefined
+  }
+}
+
+/** 把装配后的块里某一类的文本拼起来。 */
+function joinBlocks(blocks: readonly { type: string }[], type: SayChannel): string {
+  return blocks.filter(b => b.type === type).map(b => (b as { text?: string }).text ?? '').join('')
+}
+
+/**
+ * 按判决重发缓冲下来的流。
+ *
+ * 正文被拒：整段换成 `replacement`，落在第一个正文块的位置上，其余正文块丢掉。
+ * 思考块被拒：整块丢掉——思考不是话，塞一句替代话术进去等于造出模型没想过的思考。
+ * 其余 chunk（工具调用、usage、finish）原样透传：**拒绝只换话，不停这一轮**。
+ */
+function* rewriteSay(
+  buffered: readonly StreamChunk[],
+  denied: { text: boolean; reasoning: boolean },
+  replacement: string,
+): Generator<StreamChunk> {
+  let replaced = false
+  for (const chunk of buffered) {
+    const channel = channelOf(chunk)
+    if (channel === 'reasoning' && denied.reasoning) continue
+    if (channel === 'text' && denied.text) {
+      if (replaced || chunk.type !== 'block-start') continue
+      replaced = true
+      yield { type: 'block-start', index: chunk.index, blockType: 'text' }
+      yield { type: 'text-delta', index: chunk.index, text: replacement }
+      yield { type: 'block-end', index: chunk.index, block: { type: 'text', text: replacement } }
+      continue
+    }
+    yield chunk
+  }
+}
+
+/** `ctx.llm` 上这一层要包的入口。 */
+interface LlmEntry {
+  prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>
+}
+
+/**
+ * 装说话通道网关：包住 `ctx.llm.prepareCall`，整条流收完、装配后裁决，再按 chunk 协议重发。
+ *
+ * 为什么是这个位置（发现 17 实测）：
+ *   - `ctx.llm.stream` **命中 0 次**。`agent.ts` 走 `preparedCall.stream()`，公开的
+ *     `stream` 只在没注册 adapter 时才是退路——和工具侧 `execute` 同一个坑。
+ *   - `llm/stream` 是包装链，最外层说了算而 `prepend` 两边都能用，挂在那里是抢位竞赛。
+ *     包住 `prepareCall` 则整条 waterfall 在这一层里面跑完，链内谁抢赢都不影响裁决依据。
+ *   - **必须整条流收完再决定**：agent loop 每收一个 chunk 就落一条 `assistant/chunk`，
+ *     先放行再改就晚了——事件已落库、流式 UI 已经渲染过。
+ *
+ * 拒绝的语义：正文换成 `replacement`，思考块整块丢掉，**这一轮不停**——同一条消息里的
+ * 工具调用照常发出、照常执行。要连带停轮是上层的事，这一层不做。
+ *
+ * 限制，用之前先认：`prepareCall` 这个入口沙箱里的动态插件也够得到，后包的在外面。
+ * 所以这道网关拦得住话，拦不住一个能挂动态插件的业务 agent（发现 17 臂 C）。
+ * 它要成立，前提是不给业务 agent cordis 动态插件工具。
+ *
+ * @param ctx - 宿主 context。
+ * @param constraints - 参与裁决的约束。
+ * @param replacement - 正文被拒时改说的那句话。
+ * @param timeoutMs - 单条约束的判决超时，缺省 {@link DEFAULT_VERDICT_TIMEOUT_MS}。
+ */
+export function installSayGate(
+  ctx: Context, constraints: readonly Constraint[], replacement: string, timeoutMs?: number,
+): void {
+  const llm = ctx.llm as unknown as LlmEntry
+  const inner = llm.prepareCall.bind(llm)
+  llm.prepareCall = async (config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall> => {
+    const prepared = await inner(config, signal)
+    const dispatch = prepared.stream.bind(prepared)
+    // 原句柄是 Object.freeze 的，改不动它的 stream，只能整个换一个（发现 17）。
+    return {
+      ...prepared,
+      stream: (options: GenerateOptions): AsyncIterable<StreamChunk> => (async function* (): AsyncGenerator<StreamChunk> {
+        const buffered: StreamChunk[] = []
+        const assembler = new BlockAssembler()
+        for await (const chunk of dispatch(options)) {
+          buffered.push(chunk)
+          assembler.push(chunk)
+        }
+        const blocks = assembler.blocks()
+        const text = joinBlocks(blocks, 'text')
+        const reasoning = joinBlocks(blocks, 'reasoning')
+        // 两条通道分开判，并行取判决——延迟取慢的那条，不累加。空的那条不判：
+        // 没说话就没有可裁决的对象，也省掉一次语义判定的模型调用。
+        const [textVerdict, reasoningVerdict] = await Promise.all([
+          text === '' ? ALLOW : adjudicate(constraints, c => c.say?.(text, 'text'), timeoutMs),
+          reasoning === '' ? ALLOW : adjudicate(constraints, c => c.say?.(reasoning, 'reasoning'), timeoutMs),
+        ])
+        const denied = { text: textVerdict.kind === 'deny', reasoning: reasoningVerdict.kind === 'deny' }
+        if (!denied.text && !denied.reasoning) { yield * buffered; return }
+        yield * rewriteSay(buffered, denied, replacement)
+      })(),
+    }
+  }
 }

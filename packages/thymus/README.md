@@ -50,8 +50,21 @@ const specs: ConstraintSpec[] = [
 ]
 
 const constraints = compileConstraints(ctx, specs)
+
+// Judge one sentence (evaluation, tests):
 const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
+
+// Or mount both gates on a live agent, before any untrusted code loads:
+installToolGate(ctx, constraints)
+installSayGate(ctx, constraints, 'Sorry — let me hand this to a human colleague.')
 ```
+
+`installSayGate` wraps `ctx.llm.prepareCall`, buffers the whole stream, assembles it, and
+judges the assembled text — text and reasoning on separate channels, judged separately.
+A denied text block is replaced with the sentence you pass; a denied reasoning block is
+dropped. **The turn is not stopped**: tool calls in the same message still run.
+`ctx.llm.stream` is not a usable mount point — the agent loop calls `preparedCall.stream()`
+and never touches it.
 
 **Acceptance cases live next to the constraint.** That is deliberate. Without a held-out set there is no discrimination, and only a human can write one; split across two files, evaluation becomes "we'll add it later" and never arrives.
 
@@ -75,7 +88,9 @@ These were not designed up front. Each one came out of a run where we thought so
 4. **Allowlist, not denylist.** Name-based deny has a demonstrated gap: register an equivalent tool under a new name and you are through.
 5. **Do semantic judging in the gate, not in an `llm/stream` plugin.** Two semantic plugins mounted together recurse without bound.
 6. **Route judging calls through `judgeText`**, never a bare `for await ctx.llm.stream`. On failure it does not throw — it emits an error `finish` and ends normally, so `try/catch` never fires.
-7. **Separate the agent that writes constraints from the agent being constrained**, and do not give the latter dynamic-plugin tools.
+7. **Separate the agent that writes constraints from the agent being constrained**, and do not give the latter dynamic-plugin tools. On the speech side this is load-bearing, not hygiene: `prepareCall` is reachable from the sandbox, and whoever wraps it last is on the outside.
+8. **Mount the tool gate on the scheduler**, not on `ctx.tools.execute` — the agent loop never calls `execute`. Wrap `execute` too, for external callers.
+9. **Judge reasoning separately from text.** Judging the two concatenated hands the judge two different kinds of writing glued together; judging text alone lets a banned phrase through in the thinking block.
 
 ## What it does not provide
 

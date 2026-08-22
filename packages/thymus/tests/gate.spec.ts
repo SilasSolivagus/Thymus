@@ -25,7 +25,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
-import { installToolGate, gateSay, adjudicate, judgeText, type Constraint } from './thymus-src/gate.ts'
+import { installToolGate, installSayGate, gateSay, adjudicate, judgeText, type Constraint } from './thymus-src/gate.ts'
 import { lastTurnOutcome } from './thymus-src/turn.ts'
 
 const SESSION = 'gate'
@@ -751,7 +751,7 @@ describe('判决聚合层 · 调度器路径', () => {
     preTool: c => c.name === 'delete_file' ? { kind: 'deny', reason: '网关拒绝：不许删文件' } : { kind: 'allow' },
   }
 
-  it('论证59 execute 内部不走调度器——两条路必须各包各的', async () => {
+  it('论证64 execute 内部不走调度器——两条路必须各包各的', async () => {
     const ctx = await boot()
     const hits: string[] = []
     const sched = (ctx.tools as unknown as Record<symbol, Record<string, (...a: never[]) => unknown>>)[TOOL_RUNTIME_SCHEDULER]
@@ -763,7 +763,7 @@ describe('判决聚合层 · 调度器路径', () => {
     expect(hits).toEqual([])            // 只包调度器时 execute 一个都不触发
   })
 
-  it('论证60 prepare 上拒绝：返回 final-result，且带 error 字段', async () => {
+  it('论证65 prepare 上拒绝：返回 final-result，且带 error 字段', async () => {
     const ctx = await boot()
     installToolGate(ctx, [NO_DELETE_G])
     const sched = (ctx.tools as unknown as Record<symbol, Record<string, (...a: never[]) => unknown>>)[TOOL_RUNTIME_SCHEDULER]
@@ -778,7 +778,7 @@ describe('判决聚合层 · 调度器路径', () => {
     expect(JSON.stringify(prepared.result)).toBe(JSON.stringify(JSON.parse(JSON.stringify(prepared.result))))
   })
 
-  it('论证61 prepare 上放行：原样返回上游的准备结果', async () => {
+  it('论证66 prepare 上放行：原样返回上游的准备结果', async () => {
     const ctx = await boot()
     installToolGate(ctx, [NO_DELETE_G])
     const sched = (ctx.tools as unknown as Record<symbol, Record<string, (...a: never[]) => unknown>>)[TOOL_RUNTIME_SCHEDULER]
@@ -789,7 +789,7 @@ describe('判决聚合层 · 调度器路径', () => {
     expect(prepared.kind).not.toBe('final-result')
   })
 
-  it('论证62 finalize 上改写产出（按 prepare→dispatch→finalize 的真实顺序）', async () => {
+  it('论证67 finalize 上改写产出（按 prepare→dispatch→finalize 的真实顺序）', async () => {
     const ctx = await boot()
     // 调度器有不变量：finalize 的 exec 必须是 prepare 造出来的（它用 WeakMap 记取消状态），
     // 手搓一个会报 "missing cancellation state"。所以照 agent-loop 的顺序走一遍。
@@ -816,7 +816,7 @@ describe('判决聚合层 · 调度器路径', () => {
     expect(out.value).toBeUndefined()      // 原始返回值一并去掉，留着等于没脱敏
   })
 
-  it('论证63 execute 那条路仍然有效——外部调用方没被落下', async () => {
+  it('论证68 execute 那条路仍然有效——外部调用方没被落下', async () => {
     const ctx = await boot()
     installToolGate(ctx, [NO_DELETE_G])
     const res = await ctx.tools.execute({
@@ -825,5 +825,246 @@ describe('判决聚合层 · 调度器路径', () => {
     })
     expect(res.isError).toBe(true)
     expect((res as { error?: { message?: string } }).error?.message).toContain('不许删文件')
+  })
+})
+
+// ── 说话通道的挂载点：agent 走 preparedCall.stream，不走 ctx.llm.stream（发现 17）──
+// 断言一律看会话里落下的东西：`assistant/message` 是用户看到的，`assistant/chunk` 是
+// 流式 UI 逐块渲染的。两处都要干净，否则「用户没看到」不成立。
+
+const SAY_BANNED = '这个不可能'
+const SAY_REPLACEMENT = '抱歉，这个问题我需要转人工为您处理。'
+
+/** 一轮正文 + 收尾。 */
+function sayChunks(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
+
+/** 第一轮发 reasoning + 正文 + 工具调用，第二轮收尾。两条通道和工具链一起送到网关面前。 */
+class SayAdapter extends LlmAdapter {
+  private turn = 0
+  constructor(private readonly first: StreamChunk[]) { super() }
+  async * stream(): AsyncIterable<StreamChunk> {
+    if (this.turn++ > 0) { yield * sayChunks('已为您查到，账期是2026年8月。'); return }
+    yield * this.first
+  }
+}
+
+const richFirst = (thinking: string, text: string): StreamChunk[] => [
+  { type: 'block-start', index: 0, blockType: 'reasoning' },
+  { type: 'reasoning-delta', index: 0, text: thinking },
+  { type: 'block-end', index: 0, block: { type: 'reasoning', text: thinking } },
+  { type: 'block-start', index: 1, blockType: 'text' },
+  { type: 'text-delta', index: 1, text },
+  { type: 'block-end', index: 1, block: { type: 'text', text } },
+  { type: 'block-start', index: 2, blockType: 'tool-call' },
+  {
+    type: 'block-end', index: 2,
+    block: { type: 'tool-call', id: CallId('say-1'), name: 'query_bill', arguments: '{"account":"A1001"}' },
+  },
+  { type: 'finish', reason: { kind: 'tool-calls' } as never },
+]
+
+/** 会话里落下的某一类内容。`assistant/message` = 用户看到的。 */
+function messageText(events: readonly SessionEvent[], type: 'text' | 'reasoning'): string {
+  const out: string[] = []
+  for (const ev of events) {
+    const e = ev as { type?: string; data?: { message?: { content?: { type?: string; text?: string }[] } } }
+    if (e.type !== 'assistant/message') continue
+    for (const c of e.data?.message?.content ?? []) {
+      if (c.type === type && typeof c.text === 'string') out.push(c.text)
+    }
+  }
+  return out.join('\n')
+}
+
+/** 会话里落下的 `assistant/chunk` 文本——流式 UI 看到的。 */
+function chunkText(events: readonly SessionEvent[]): string {
+  const out: string[] = []
+  for (const ev of events) {
+    const e = ev as { type?: string; data?: { chunk?: { type?: string; text?: string; block?: { type?: string; text?: string } } } }
+    if (e.type !== 'assistant/chunk') continue
+    const c = e.data?.chunk
+    if ((c?.type === 'text-delta' || c?.type === 'reasoning-delta') && typeof c.text === 'string') out.push(c.text)
+    if (c?.type === 'block-end' && typeof c.block?.text === 'string') out.push(c.block.text)
+  }
+  return out.join(' | ')
+}
+
+let sayAgentSeq = 0
+
+/** 跑一轮真 agent。`install` 在 agent 建起来之前动手。 */
+async function runSayAgent(first: StreamChunk[], install: (ctx: Context) => void | Promise<void>): Promise<{
+  said: string; thinking: string; chunks: string; toolRuns: number; turnOk: boolean
+}> {
+  let toolRuns = 0
+  const ctx = new Context()
+  await ctx.plugin(Timer)
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  ctx.llm.registerAdapter(['fake'], new SayAdapter(first))
+  ctx.tools.register({
+    name: 'query_bill', description: '查询账单',
+    parameters: { type: 'object', properties: { account: { type: 'string' } }, required: ['account'] },
+    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v as string }] },
+    execute: (): Promise<string> => { toolRuns++; return Promise.resolve('账期=2026-08 金额=30元') },
+  } as ToolDefinition)
+  await install(ctx)
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(`say-agent-${++sayAgentSeq}`),
+    agentOptions: { provider: 'fake', model: 'fake' },
+    setup: async () => {},
+  })
+  const real = handle.agent
+  real.followup(createUserMessage({
+    content: [{ type: 'text', text: '我这个月账单多少？' }], source: { kind: 'user' },
+  }))
+  await real.whenIdle()
+  const events = [...real.session.events] as SessionEvent[]
+  return {
+    said: messageText(events, 'text'),
+    thinking: messageText(events, 'reasoning'),
+    chunks: chunkText(events),
+    toolRuns,
+    turnOk: lastTurnOutcome(events).ok,
+  }
+}
+
+const NO_BANNED_SAY: Constraint = {
+  name: 'no-banned-say',
+  say: t => t.includes(SAY_BANNED) ? { kind: 'deny', reason: '命中禁语' } : { kind: 'allow' },
+}
+
+describe('说话通道网关 · 挂载点与拒绝语义', () => {
+  it('论证69 对照：没有网关时，禁语落进 assistant/message 和 assistant/chunk', async () => {
+    const r = await runSayAgent(sayChunks(SAY_BANNED), () => {})
+    expect(r.said).toContain(SAY_BANNED)
+    expect(r.chunks).toContain(SAY_BANNED)
+  })
+
+  it('论证70 挂 ctx.llm.stream 拦不到——agent 走 preparedCall.stream', async () => {
+    let hits = 0
+    const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      const llm = ctx.llm as unknown as { stream: (o: never) => AsyncIterable<StreamChunk> }
+      const inner = llm.stream.bind(llm)
+      llm.stream = (o: never): AsyncIterable<StreamChunk> => { hits++; return inner(o) }
+    })
+    expect(hits).toBe(0)                       // ← 一次都不响
+    expect(r.said).toContain(SAY_BANNED)
+  })
+
+  it('论证71 网关装上：正文换成替代话术，chunk 里也没有禁语', async () => {
+    const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      installSayGate(ctx, [NO_BANNED_SAY], SAY_REPLACEMENT)
+    })
+    expect(r.said).toBe(SAY_REPLACEMENT)
+    expect(r.chunks).not.toContain(SAY_BANNED)  // 先放行再改就晚了：这里证明没先放行
+    expect(r.turnOk).toBe(true)
+  })
+
+  it('论证72 合规话术原样放行，网关不动它', async () => {
+    const clean = '已为您核实，账期是2026年8月。'
+    const r = await runSayAgent(sayChunks(clean), ctx => {
+      installSayGate(ctx, [NO_BANNED_SAY], SAY_REPLACEMENT)
+    })
+    expect(r.said).toBe(clean)
+  })
+
+  it('论证73 reasoning 分开判：正文合规、禁语藏在思考块里，照样抓得到', async () => {
+    const seen: [string, string][] = []
+    const recording: Constraint = {
+      name: 'recording',
+      say: (t, channel) => {
+        seen.push([channel, t])
+        return t.includes(SAY_BANNED) ? { kind: 'deny', reason: '命中禁语' } : { kind: 'allow' }
+      },
+    }
+    const r = await runSayAgent(
+      richFirst(`用户想退费，${SAY_BANNED}，先查账单`, '好的，我查一下。'),
+      ctx => { installSayGate(ctx, [recording], SAY_REPLACEMENT) },
+    )
+    // 两条通道各判一次，各自是自己那段——没有拼成一段
+    const firstRound = seen.slice(0, 2)
+    expect(firstRound.map(x => x[0]).sort()).toEqual(['reasoning', 'text'])
+    expect(firstRound.find(x => x[0] === 'text')?.[1]).toBe('好的，我查一下。')
+    expect(firstRound.find(x => x[0] === 'reasoning')?.[1]).toContain(SAY_BANNED)
+    // 思考块整块丢掉，正文没被牵连
+    expect(r.thinking).toBe('')
+    expect(r.said).toContain('好的，我查一下。')
+    expect(r.said).not.toContain(SAY_REPLACEMENT)
+    expect(r.chunks).not.toContain(SAY_BANNED)
+  })
+
+  it('论证74 只判正文会漏：约束不看 reasoning 时，禁语从思考块原样落库（阳性对照）', async () => {
+    const textOnly: Constraint = {
+      name: 'text-only',
+      say: (t, channel) => channel === 'text' && t.includes(SAY_BANNED)
+        ? { kind: 'deny', reason: '命中禁语' }
+        : { kind: 'allow' },
+    }
+    const r = await runSayAgent(
+      richFirst(`用户想退费，${SAY_BANNED}，先查账单`, '好的，我查一下。'),
+      ctx => { installSayGate(ctx, [textOnly], SAY_REPLACEMENT) },
+    )
+    expect(r.thinking).toContain(SAY_BANNED)   // ← 漏点：这一层拦的是话，不是思考
+  })
+
+  it('论证75 拒绝只换话不停轮：同一条消息里的工具调用照常发出、照常执行', async () => {
+    const r = await runSayAgent(
+      richFirst('先查账单', SAY_BANNED),
+      ctx => { installSayGate(ctx, [NO_BANNED_SAY], SAY_REPLACEMENT) },
+    )
+    expect(r.said).toContain(SAY_REPLACEMENT)
+    expect(r.said).not.toContain(SAY_BANNED)
+    expect(r.toolRuns).toBe(1)                 // 工具体照跑
+    expect(r.turnOk).toBe(true)                // 这一轮没被打断
+    expect(r.said).toContain('已为您查到')      // 工具结果回来后还接着说了下一句
+  })
+
+  it('论证76 抢位：动态插件在 llm/stream 上 prepend 塞回禁语，网关仍拦得住', async () => {
+    // 这是说话侧与工具侧最不一样的地方，也是选错挂载点时唯一会暴露的地方：
+    // 网关先装、敌意插件后前插，链内它排最前、说了算——但整条链在我们这一层里面跑完。
+    const attack = async (ctx: Context): Promise<void> => {
+      await ctx.plugin(DynamicCordisRunner, {})
+      expect(await mountDynamic(ctx, hostileSay(true), 'hsy', 'hostile-say'), '敌意插件挂载').toBe(true)
+    }
+    const clean = '已为您核实，账期是2026年8月。'
+
+    // 阳性对照：没有网关时，这一手确实把禁语送到用户面前
+    const bare = await runSayAgent(sayChunks(clean), attack)
+    expect(bare.said).toContain(SAY_BANNED)
+
+    const gated = await runSayAgent(sayChunks(clean), async ctx => {
+      installSayGate(ctx, [NO_BANNED_SAY], SAY_REPLACEMENT)
+      await attack(ctx)
+    })
+    expect(gated.said).toBe(SAY_REPLACEMENT)
+    expect(gated.chunks).not.toContain(SAY_BANNED)
+  })
+
+  it('论证77 没说话就不判：纯工具调用那一轮不会触发裁决', async () => {
+    let asked = 0
+    const counting: Constraint = { name: 'counting', say: () => { asked++; return { kind: 'allow' } } }
+    await runSayAgent(
+      [
+        { type: 'block-start', index: 0, blockType: 'tool-call' },
+        {
+          type: 'block-end', index: 0,
+          block: { type: 'tool-call', id: CallId('say-2'), name: 'query_bill', arguments: '{"account":"A1001"}' },
+        },
+        { type: 'finish', reason: { kind: 'tool-calls' } as never },
+      ],
+      ctx => { installSayGate(ctx, [counting], SAY_REPLACEMENT) },
+    )
+    expect(asked).toBe(1)                      // 只有收尾那一轮的正文被判，工具那轮零判定
   })
 })

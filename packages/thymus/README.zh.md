@@ -50,8 +50,19 @@ const specs: ConstraintSpec[] = [
 ]
 
 const constraints = compileConstraints(ctx, specs)
+
+// 判一句话（评测、测试用）：
 const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
+
+// 或者装到真 agent 上，在任何不受信任的代码加载之前：
+installToolGate(ctx, constraints)
+installSayGate(ctx, constraints, '抱歉，这个问题我需要转人工为您处理。')
 ```
+
+`installSayGate` 包住 `ctx.llm.prepareCall`，整条流收完、装配后再裁决装配后的文本——
+正文与思考块分两条通道**各判一次**。正文被拒换成你传的那句话，思考块被拒整块丢掉。
+**这一轮不停**：同一条消息里的工具调用照常执行。`ctx.llm.stream` 不是可用的挂载点，
+agent loop 走的是 `preparedCall.stream()`，那个入口一次都不响。
 
 **验收用例和约束写在同一处**，这是刻意的。没有留出集就没有判别力，而留出集只有人写得出来；分成两个文件，评测就会变成「以后再补」，然后永远不补。
 
@@ -75,7 +86,9 @@ const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
 4. **白名单，不是黑名单。** 按名字 deny 有确证缺口——注册一个同功能新名字就绕过。
 5. **语义判定放网关里，不要写成 `llm/stream` 插件。** 两个语义插件挂一起会无限递归。
 6. **判定用的模型调用走 `judgeText`**，不要直接 `for await ctx.llm.stream`。它失败时不抛错，发 error finish 后正常结束，`try/catch` 不触发。
-7. **写约束的 agent 和被约束的业务 agent 必须分开**，业务 agent 不给动态插件工具。
+7. **写约束的 agent 和被约束的业务 agent 必须分开**，业务 agent 不给动态插件工具。说话侧这一条是承重的，不是卫生条件：`prepareCall` 沙箱里够得到，后包的在外面。
+8. **工具通道网关挂调度器**，不是 `ctx.tools.execute`——agent loop 不走 execute。`execute` 也要包，它服务外部调用方。
+9. **reasoning 与正文分开判。** 拼成一段判，判定器拿到的是两段性质不同的文本粘在一起；只判正文，禁语会从思考块漏出。
 
 ## 它不提供什么
 

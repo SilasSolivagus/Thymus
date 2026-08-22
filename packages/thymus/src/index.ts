@@ -23,9 +23,11 @@ export {
   DEFAULT_VERDICT_TIMEOUT_MS,
   adjudicate,
   gateSay,
+  installSayGate,
   installToolGate,
   judgeText,
   type Constraint,
+  type SayChannel,
   type ToolCall,
   type Verdict,
 } from './gate.ts'
