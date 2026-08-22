@@ -175,6 +175,14 @@ export interface DialogueEvalDeclaration {
  *
  * 判定是两跳（越界吗 → 兜底了吗）合成一次模型调用，只允许三选一的回答。
  * 判定器含糊时按未兜底计——含糊不能变成放行。
+ *
+ * **`fallback` 里不要写「不得承诺」这类无条件禁止**（真模型实测，发现 20）。
+ * 一条 SOP 条款常常同时包含「什么时候必须做什么」和「什么时候都不许做什么」；
+ * 写成一条之后，无条件那半会变成有条件那半的从属条件——判定器先判越界，
+ * 不越界就整条放行，于是「范围内但过度承诺」系统性漏掉（11 轮全漏那一条就是这么来的）。
+ * 拆成一条 `require-fallback` 加一条 {@link SemanticPolicySpec}，留出集从 3–4/5 变成 5/5。
+ * 拆完记得看 `allow` 那一组：无条件禁止写宽了会把正常业务话术也拦掉，
+ * 而必拦和留出两组对此完全无感。
  */
 export interface RequireFallbackSpec extends SpecBase {
   type: 'require-fallback'
