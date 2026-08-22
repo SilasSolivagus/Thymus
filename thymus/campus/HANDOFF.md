@@ -120,11 +120,21 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 - 环境两修：`demo/run.sh` 漏拷 `packages/thymus/src`；这台机器要走代理而 Node 的
   fetch 默认不认 `HTTP_PROXY`，加 `--use-env-proxy`（不加时所有真模型调用全失败，
   而失败的样子和「模型不泄露」一模一样）。
+- **工具通道网关搬到调度器——已做**。`installToolGate` 现在同时包三处：调度器的
+  `prepare`（拒绝）与 `finalize`（改写产出），外加原来的 `ctx.tools.execute`
+  （只服务外部调用方，含评测框架）。两条路径在 dsh 里各自直达同一份私有实现、
+  不互相转发，一次调用只被裁决一次（论证63 在数）。拒绝结果补了 `error` 字段。
+  验收改用真链路：脚本化 adapter 发一次 tool-call，走 `agent-loop/tool-calls.ts`，
+  断言看的是**模型在下一轮请求里实际收到的 tool-result**，不是我们自己的返回值
+  （论证59–63，不花钱）。四条对照：老写法在真 agent 上 execute 命中 0 次、
+  无网关时内部字段确实漏、缺 `error` 时拒绝理由被换成序列化错误发给模型、
+  抹除只动该动的字段。测试 11 files / 112 passed。
 
-**下一步（已探明，可以动手）**：把 `installToolGate` 从 `execute` 改挂到调度器
-（`prepare` 拒绝 + `finalize` 改写），同时保留 `execute` 的包装给外部调用方；
-拒绝结果补 `error` 字段（见发现 16，现在这个 bug 一挂上去就会炸）。
-说话侧改成挂 `llm/stream` waterfall、装配后裁决，不再自己 dispatch。
+**下一步（说话侧，要先探再写）**：HANDOFF 原先写「说话侧改成挂 `llm/stream` waterfall」，
+但那正是 STATUS 架构结论第 2 条禁止的同侪形态——论证12 实测四种挂载顺序里输两种。
+工具侧能站到链外，是因为调度器是链外的入口；说话侧的对应物是什么还没探。
+第一个候选是包住 `ctx.llm.stream` 这个服务方法本身（与包 `execute` 同形），
+用脚本化 adapter 就能测，不花钱。探明之前不要写 `installSayGate`。
 
 之后：B 类（认人前置）——它要跨调用记状态，得先探状态挂在哪、多 agent 会不会串。
 
@@ -168,7 +178,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 ## 运行方式
 
 - 探针/demo：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
-- 测试：`./thymus/run-tests.sh`（应为 7 files / 40 passed）
+- 测试：`./thymus/run-tests.sh`（应为 11 files / 112 passed）
 - `spec-plugins.ts` 顶层已改为「仅直接执行时运行」。**其他 campus 脚本不要 import 它**
   之外的实验脚本前先确认同样有这个判断——曾因顶层无条件 `main()` 被 import 触发重跑，
   覆盖过冻结的 `evals.json`（从 `../trajectories/_no-cwd/campus-author/session.jsonl`

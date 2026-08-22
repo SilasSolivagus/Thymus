@@ -16,16 +16,17 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
-import LlmRuntime, { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import LlmRuntime, { CallId, LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
 import { installToolGate, gateSay, adjudicate, judgeText, type Constraint } from './thymus-src/gate.ts'
+import { lastTurnOutcome } from './thymus-src/turn.ts'
 
 const SESSION = 'gate'
 const agent = { id: SESSION } as never
@@ -574,5 +575,255 @@ describe('judgeText · 五种结束形态的覆盖', () => {
   it('论证43 adapter 自扩展的未知结束原因：不认识就不放行', async () => {
     const r = await judgeWith([...textChunks('x'), { type: 'finish', reason: { kind: 'provider-specific-weirdness' } } as never])
     expect(r.error).toContain('未正常结束')
+  })
+})
+
+// ── 挂载点：真 agent 走调度器，不走 execute（发现 16 的实现验收）──
+// 造一次真实的工具调用：脚本化 adapter 第一轮发 tool-call，第二轮发文本收尾。
+// 不调模型、不花钱，但走的是 `agent-loop/tool-calls.ts` 那条真路径——
+// 上一版网关单测全过、真 agent 上一次都不触发，就是因为这条路径没被测到。
+
+const INTERNAL = '_internal_note=风控标记'
+const BILL_TEXT = `账期=2026-08 金额=30元 ${INTERNAL}`
+
+const BILL_TOOL: ToolDefinition = {
+  name: 'query_bill', description: '查询账单',
+  parameters: { type: 'object', properties: { account: { type: 'string' } }, required: ['account'] },
+  output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v as string }] },
+  execute: (): Promise<string> => Promise.resolve(BILL_TEXT),
+}
+
+/** 第一轮发一次工具调用，之后发文本收尾；把每次请求留下来，看模型实际收到什么。 */
+class ToolCallingAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = []
+  private turn = 0
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
+    if (this.turn++ > 0) {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '好的' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '好的' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield {
+      type: 'block-end', index: 0,
+      block: { type: 'tool-call', id: CallId('bill-1'), name: 'query_bill', arguments: '{"account":"A1001"}' },
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } as never }
+  }
+}
+
+/** 模型在后续请求里实际看到的工具产出。裁决有没有生效，看这里，不看我们自己的返回值。 */
+function toolResultTexts(requests: readonly GenerateOptions[]): string {
+  const out: string[] = []
+  for (const req of requests) {
+    for (const m of req.messages as readonly { content?: readonly Record<string, unknown>[] }[]) {
+      for (const b of m.content ?? []) {
+        if (b.type !== 'tool-result') continue
+        for (const c of (b.content ?? []) as readonly { type?: string; text?: string }[]) {
+          if (c.type === 'text' && typeof c.text === 'string') out.push(c.text)
+        }
+      }
+    }
+  }
+  return out.join('\n')
+}
+
+let toolAgentSeq = 0
+
+/** 跑一次真 agent 的工具调用。`install` 在 agent 建起来之前动手。 */
+async function runToolAgent(install: (ctx: Context) => void): Promise<{
+  bodyRuns: number; seenByModel: string; turnOk: boolean; threw: string
+}> {
+  let bodyRuns = 0
+  const ctx = new Context()
+  await ctx.plugin(Timer)
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  const adapter = new ToolCallingAdapter()
+  ctx.llm.registerAdapter(['fake'], adapter)
+  ctx.tools.register({ ...BILL_TOOL, execute: (): Promise<string> => { bodyRuns++; return Promise.resolve(BILL_TEXT) } })
+  install(ctx)
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(`tool-agent-${++toolAgentSeq}`),
+    agentOptions: { provider: 'fake', model: 'fake' },
+    setup: async () => {},
+  })
+  const real = handle.agent
+  let threw = ''
+  real.followup(createUserMessage({
+    content: [{ type: 'text', text: '查一下账单' }], source: { kind: 'user' },
+  }))
+  try { await real.whenIdle() } catch (e) { threw = e instanceof Error ? e.message : String(e) }
+  const outcome = lastTurnOutcome([...real.session.events] as SessionEvent[])
+  return { bodyRuns, seenByModel: toolResultTexts(adapter.requests), turnOk: outcome.ok, threw }
+}
+
+const NO_BILL: Constraint = {
+  name: 'no-bill',
+  preTool: c => c.name === 'query_bill'
+    ? { kind: 'deny', reason: '网关拒绝：该工具不在白名单里' }
+    : { kind: 'allow' },
+}
+const MASK_INTERNAL: Constraint = {
+  name: 'mask-internal',
+  postTool: (_c, text) => text.replace(/_internal_note=\S*/g, '_internal_note=***'),
+}
+
+describe('判决聚合层 · 挂载点（真 agent 的工具调用）', () => {
+  it('论证59 对照：只包 execute 时，真 agent 的调用一次都不经过它', async () => {
+    let hits = 0
+    const r = await runToolAgent(ctx => {
+      // 老写法：只包 execute，且一律拒绝。真 agent 上它应当一次都不响。
+      const rt = ctx.tools as unknown as { execute: (c: never) => Promise<unknown> }
+      rt.execute = (): Promise<unknown> => {
+        hits++
+        return Promise.resolve({
+          isError: true, error: { message: 'execute 拒绝' },
+          content: [{ type: 'text', text: 'execute 拒绝' }],
+        })
+      }
+    })
+    expect(hits).toBe(0)                          // ← execute 一次都没响
+    expect(r.bodyRuns).toBe(1)                    // 工具体照跑
+    expect(r.seenByModel).toContain(INTERNAL)     // 拒绝根本没到模型面前
+  })
+
+  it('论证60 网关装上：prepare 拒绝生效，工具体不执行，理由传到模型', async () => {
+    const r = await runToolAgent(ctx => { installToolGate(ctx, [NO_BILL]) })
+    expect(r.bodyRuns).toBe(0)
+    expect(r.seenByModel).toContain('不在白名单里')
+    expect(r.seenByModel).not.toContain(INTERNAL)
+    expect(r.turnOk).toBe(true)                   // 拒绝是正常结束，不是把这一轮打崩
+  })
+
+  it('论证61 拒绝结果不带 error 字段，拒绝理由会被换成序列化错误——这是 denyResult 补它的理由', async () => {
+    const r = await runToolAgent(ctx => {
+      const sched = (ctx.tools as unknown as Record<symbol, { prepare: (e: never) => Promise<{ exec: unknown }> }>)[TOOL_RUNTIME_SCHEDULER]
+      const inner = sched.prepare.bind(sched)
+      sched.prepare = async (e: never): Promise<never> => {
+        const prepared = await inner(e)
+        // 少一个 error：materializeFinalResult 判它有损，抛序列化错。
+        return { kind: 'final-result', exec: prepared.exec, result: { isError: true, content: [{ type: 'text', text: '拒绝' }] } } as never
+      }
+    })
+    expect(r.bodyRuns).toBe(0)
+    // 不是崩掉，是更难查的形态：拒绝理由被换成一条序列化错误发给模型，
+    // 我们写的理由一个字都不到。走 execute 不过这道校验，所以老单测测不出来。
+    expect(r.seenByModel).toContain('losslessly JSON-serializable')
+    expect(r.seenByModel).not.toContain('拒绝')
+  })
+
+  it('论证62 finalize 改写：模型看到的产出里内部字段已抹掉，工具体照常执行', async () => {
+    const bare = await runToolAgent(() => {})
+    expect(bare.seenByModel).toContain(INTERNAL)  // 阳性对照：没网关时确实漏
+
+    const r = await runToolAgent(ctx => { installToolGate(ctx, [MASK_INTERNAL]) })
+    expect(r.bodyRuns).toBe(1)
+    expect(r.seenByModel).not.toContain(INTERNAL)
+    expect(r.seenByModel).toContain('_internal_note=***')
+    expect(r.seenByModel).toContain('金额=30元')  // 只抹该抹的
+    expect(r.turnOk).toBe(true)
+  })
+
+  it('论证63 execute 与调度器不互相转发：一次调用只裁决一次', async () => {
+    let asked = 0
+    const counting: Constraint = { name: 'counting', preTool: () => { asked++; return { kind: 'allow' } } }
+    const r = await runToolAgent(ctx => { installToolGate(ctx, [counting]) })
+    expect(r.bodyRuns).toBe(1)
+    expect(asked).toBe(1)
+  })
+})
+
+// ── 网关挂到 agent 真正走的那条路上（发现 16）──
+// agent-loop 不走 ctx.tools.execute，它走符号键调度器，两条路完全独立。
+// 端到端已由 probe-real-path 各 n=3 验过；这里覆盖包装逻辑本身。
+
+describe('判决聚合层 · 调度器路径', () => {
+  const NO_DELETE_G: Constraint = {
+    name: 'no-delete',
+    preTool: c => c.name === 'delete_file' ? { kind: 'deny', reason: '网关拒绝：不许删文件' } : { kind: 'allow' },
+  }
+
+  it('论证59 execute 内部不走调度器——两条路必须各包各的', async () => {
+    const ctx = await boot()
+    const hits: string[] = []
+    const sched = (ctx.tools as unknown as Record<symbol, Record<string, (...a: never[]) => unknown>>)[TOOL_RUNTIME_SCHEDULER]
+    for (const m of ['prepare', 'dispatch', 'finalize']) {
+      const orig = sched[m]!.bind(sched)
+      sched[m] = (...a: never[]): unknown => { hits.push(m); return orig(...a) }
+    }
+    await denied(ctx)
+    expect(hits).toEqual([])            // 只包调度器时 execute 一个都不触发
+  })
+
+  it('论证60 prepare 上拒绝：返回 final-result，且带 error 字段', async () => {
+    const ctx = await boot()
+    installToolGate(ctx, [NO_DELETE_G])
+    const sched = (ctx.tools as unknown as Record<symbol, Record<string, (...a: never[]) => unknown>>)[TOOL_RUNTIME_SCHEDULER]
+    const prepared = await sched.prepare!({
+      callId: CallId('sch-1'), name: 'delete_file', arguments: { path: 'x' }, agent,
+      signal: new AbortController().signal,
+    } as never) as { kind: string; result?: { isError?: boolean; error?: { message?: string }; content?: { text?: string }[] } }
+    expect(prepared.kind).toBe('final-result')
+    expect(prepared.result?.isError).toBe(true)
+    // error 必须在：materializeFinalResult 会把带 undefined 属性的对象判为有损并抛错
+    expect(prepared.result?.error?.message).toContain('不许删文件')
+    expect(JSON.stringify(prepared.result)).toBe(JSON.stringify(JSON.parse(JSON.stringify(prepared.result))))
+  })
+
+  it('论证61 prepare 上放行：原样返回上游的准备结果', async () => {
+    const ctx = await boot()
+    installToolGate(ctx, [NO_DELETE_G])
+    const sched = (ctx.tools as unknown as Record<symbol, Record<string, (...a: never[]) => unknown>>)[TOOL_RUNTIME_SCHEDULER]
+    const prepared = await sched.prepare!({
+      callId: CallId('sch-2'), name: 'safe_tool', arguments: {}, agent,
+      signal: new AbortController().signal,
+    } as never) as { kind: string }
+    expect(prepared.kind).not.toBe('final-result')
+  })
+
+  it('论证62 finalize 上改写产出（按 prepare→dispatch→finalize 的真实顺序）', async () => {
+    const ctx = await boot()
+    // 调度器有不变量：finalize 的 exec 必须是 prepare 造出来的（它用 WeakMap 记取消状态），
+    // 手搓一个会报 "missing cancellation state"。所以照 agent-loop 的顺序走一遍。
+    ctx.tools.register({
+      name: 'read_secret', description: 'secret',
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v as string }] },
+      execute: (): Promise<string> => Promise.resolve('账号=A1 密码=hunter2'),
+    } as ToolDefinition)
+    installToolGate(ctx, [{
+      name: 'mask',
+      postTool: (_c, text): string => text.replace(/密码=\S*/g, '密码=***'),
+    }])
+    const sched = (ctx.tools as unknown as Record<symbol, Record<string, (...a: never[]) => unknown>>)[TOOL_RUNTIME_SCHEDULER]
+    const prepared = await sched.prepare!({
+      callId: CallId('sch-3'), name: 'read_secret', arguments: {}, agent,
+      signal: new AbortController().signal,
+    } as never) as { kind: string; exec: unknown }
+    expect(prepared.kind).toBe('dispatch')
+    const dispatched = await sched.dispatch!(prepared.exec as never) as { result: unknown }
+    const out = await sched.finalize!(prepared.exec as never, dispatched.result as never) as
+      { content: { text: string }[]; value?: unknown }
+    expect(out.content[0]?.text).toBe('账号=A1 密码=***')
+    expect(out.value).toBeUndefined()      // 原始返回值一并去掉，留着等于没脱敏
+  })
+
+  it('论证63 execute 那条路仍然有效——外部调用方没被落下', async () => {
+    const ctx = await boot()
+    installToolGate(ctx, [NO_DELETE_G])
+    const res = await ctx.tools.execute({
+      signal: new AbortController().signal, callId: CallId('sch-4'),
+      name: 'delete_file', arguments: { path: 'x.txt' }, agent,
+    })
+    expect(res.isError).toBe(true)
+    expect((res as { error?: { message?: string } }).error?.message).toContain('不许删文件')
   })
 })

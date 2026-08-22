@@ -10,8 +10,10 @@
  * 收齐判决再裁决就不会。
  *
  * 这里的两个网关都站在链外：
- *   工具通道 —— 包住 `ctx.tools.execute`。链上的 handler 再怎么抢位、返回什么，
- *               都在这一层之后才有机会跑。
+ *   工具通道 —— 包住调度器的 `prepare`（拒绝）与 `finalize`（改写产出），另外仍包住
+ *               `ctx.tools.execute`。真 agent 走的是调度器，`execute` 一次都不响，
+ *               只服务外部调用方（发现 16）。链上的 handler 在 `prepare` 内部跑，
+ *               它们再怎么抢位、返回什么，都要等这一层裁完才算数。
  *   说话通道 —— 先跑完整条 `llm/stream` waterfall 并装配，再对**装配后的文本**裁决。
  *               链内插件能改写文本，但改不掉「装配完还要过一道」这件事。
  *
@@ -23,6 +25,10 @@
 import { Context } from '@deepseek-ai/cordis'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
+import type {
+  ScheduledToolPreparation, ToolExecutionInput, ToolExecutionResult, ToolRunContext,
+} from '@deepseek-ai/dsh-tools'
 
 /** 一条判决。没有 `ask`——这一层只做确定性裁决，要人介入是上层的事。 */
 export type Verdict = { kind: 'allow' } | { kind: 'deny'; reason: string }
@@ -102,15 +108,53 @@ export async function adjudicate(
   return verdicts.find((v): v is { kind: 'deny'; reason: string } => v.kind === 'deny') ?? { kind: 'allow' }
 }
 
-/** `ctx.tools.execute` 的返回形状里这一层要构造的部分。 */
+/** 工具结果形状里这一层要构造或改写的部分。 */
 interface ToolResult {
   content: { type: 'text'; text: string }[]
   isError: boolean
+  error?: { message: string }
+  value?: unknown
 }
 
 /**
- * 装工具通道网关：包住 `ctx.tools.execute`，在派发之前裁决。
+ * 构造一个拒绝结果。**`error` 必须给**：调度器把 `{ isError, error, …presentation }`
+ * 整体过 `snapshotJsonValue`，对象里带一个 `undefined` 属性就判为有损，抛
+ * 「tool result must be losslessly JSON-serializable」。走 `execute` 不过这道校验，
+ * 所以缺这个字段只会在真实链路上炸（发现 16）。
+ */
+function denyResult(reason: string): ToolResult {
+  return { isError: true, error: { message: reason }, content: [{ type: 'text', text: reason }] }
+}
+
+/** 调度器视图上这一层要包的两个方法。dsh 把它标了 `@internal`，跨版本要重新核对。 */
+interface SchedulerView {
+  prepare(exec: ToolExecutionInput): Promise<ScheduledToolPreparation>
+  finalize(exec: ToolRunContext, result: ToolExecutionResult): Promise<ToolExecutionResult>
+}
+
+/** 从一次执行输入里取裁决者看得到的部分。`arguments` 在 dsh 那边是 `unknown`。 */
+function toolCallOf(exec: { name: string; arguments: unknown }): ToolCall {
+  const args = exec.arguments
+  return {
+    name: exec.name,
+    arguments: typeof args === 'object' && args !== null ? args as Record<string, unknown> : {},
+  }
+}
+
+/**
+ * 装工具通道网关：派发之前裁决，产出交回之前改写。
+ *
+ * 两条路径都要包，因为 agent 和外部调用方走的不是同一条（发现 16 实测：真 agent 跑一轮，
+ * `execute` 命中 0 次）：
+ *   调度器 `prepare` / `finalize` —— `agent-loop/tool-calls.ts` 实际走的路径。
+ *   `ctx.tools.execute`          —— 外部调用方（含评测框架）走的路径。
+ * 这两条在 dsh 里各自直达同一份私有实现、不互相转发，所以一次调用只被裁决一次。
+ *
  * 必须在任何被约束方的代码加载之前装——和 seccomp 一样，先装过滤器再放行不受信任的代码。
+ *
+ * 未覆盖：`dispatch` 与 `finish` 没包。成功结果一律经 `finalize`，走 `finish` 的是
+ * 出错结果和本层自己给出的拒绝，两者都没有可脱敏的产出。
+ *
  * @param ctx - 宿主 context。
  * @param constraints - 参与裁决的约束。
  * @param timeoutMs - 单条约束的判决超时，缺省 {@link DEFAULT_VERDICT_TIMEOUT_MS}。
@@ -118,15 +162,37 @@ interface ToolResult {
 export function installToolGate(
   ctx: Context, constraints: readonly Constraint[], timeoutMs?: number,
 ): void {
-  const runtime = ctx.tools as unknown as { execute: (call: never) => Promise<ToolResult> }
-  const inner = runtime.execute.bind(runtime)
+  const runtime = ctx.tools as unknown as Record<string | symbol, unknown>
+  const preVerdict = async (name: string, args: Record<string, unknown>): Promise<Verdict> =>
+    adjudicate(constraints, c => c.preTool?.({ name, arguments: args }), timeoutMs)
+
+  // 路径一：`ctx.tools.execute`——外部调用方走这条。
+  const innerExecute = (runtime.execute as (c: never) => Promise<ToolResult>).bind(ctx.tools)
   runtime.execute = async (call: never): Promise<ToolResult> => {
     const { name, arguments: args } = call as unknown as ToolCall
-    const toolCall: ToolCall = { name, arguments: args }
-    const verdict = await adjudicate(constraints, c => c.preTool?.(toolCall), timeoutMs)
-    if (verdict.kind === 'deny') return { content: [{ type: 'text', text: verdict.reason }], isError: true }
-    const result = await inner(call)
-    return rewriteResult(constraints, toolCall, result)
+    const verdict = await preVerdict(name, args)
+    if (verdict.kind === 'deny') return denyResult(verdict.reason)
+    return rewriteResult(constraints, { name, arguments: args }, await innerExecute(call))
+  }
+
+  // 路径二：调度器——**agent-loop 走这条，而且不经过 execute**（实测两条完全独立）。
+  // 只包 execute 的话，agent 自己发起的调用一次都不会被裁决。
+  const sched = runtime[TOOL_RUNTIME_SCHEDULER] as Record<string, (...a: never[]) => unknown>
+  const innerPrepare = sched.prepare!.bind(sched)
+  sched.prepare = async (...a: never[]): Promise<unknown> => {
+    const exec = a[0] as unknown as { name: string; arguments?: Record<string, unknown> }
+    const prepared = await innerPrepare(...a) as { kind: string; exec: unknown }
+    const verdict = await preVerdict(exec.name, exec.arguments ?? {})
+    // 工具体在 dispatch 阶段才跑，所以这里拒绝仍然拦得住它执行。
+    return verdict.kind === 'deny'
+      ? { kind: 'final-result', exec: prepared.exec, result: denyResult(verdict.reason) }
+      : prepared
+  }
+  const innerFinalize = sched.finalize!.bind(sched)
+  sched.finalize = async (...a: never[]): Promise<unknown> => {
+    const exec = a[0] as unknown as { name: string; arguments?: Record<string, unknown> }
+    const result = await innerFinalize(...a) as ToolResult
+    return rewriteResult(constraints, { name: exec.name, arguments: exec.arguments ?? {} }, result)
   }
 }
 
@@ -147,10 +213,7 @@ async function rewriteResult(
       if (typeof next === 'string') text = next
     } catch (e) {
       // 抹不掉就不能放行：脱敏失败留下的必须是拒绝，不是原文。
-      return {
-        isError: true,
-        content: [{ type: 'text', text: `约束「${c.name}」改写产出失败：${e instanceof Error ? e.message : String(e)}` }],
-      }
+      return denyResult(`约束「${c.name}」改写产出失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
   if (text === first.text) return result

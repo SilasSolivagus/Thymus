@@ -1,9 +1,9 @@
 # Thymus 现状（先读这份）
 
-15 份 FINDINGS 里有若干条已被后来的实验推翻或降级。**只读某一份会踩到作废的结论**，
+16 份 FINDINGS 里有若干条已被后来的实验推翻或降级。**只读某一份会踩到作废的结论**，
 所以先读这份，再按需要跳转。
 
-最后更新：本轮结束时。测试 `./thymus/run-tests.sh` 应为 10 files / 92 passed。
+最后更新：工具通道网关搬到调度器之后。测试 `./thymus/run-tests.sh` 应为 11 files / 112 passed。
 
 ---
 
@@ -16,7 +16,7 @@
 
 ## 架构结论（可直接照做的设计规则）
 
-这七条都有实测支撑，编号指向证据。
+这九条都有实测支撑，编号指向证据。
 
 1. **约束不进动态注册表**，由宿主直接挂载。否则任何动态插件都能 `stop` 掉它（08），
    连换版失败都会把它带走（14）。
@@ -31,8 +31,16 @@
    失败时它不抛错，发 error finish 后正常结束，try/catch 不触发（15）。
 7. **写约束的 agent 和被约束的业务 agent 必须分开**，业务 agent 不给 cordis 动态插件工具。
    一旦有，它能自挂前插的 allow，或提交一个装载即抛错的新版把约束带走（09、14）。
+8. **工具通道的网关挂调度器**（`ctx.tools[TOOL_RUNTIME_SCHEDULER]` 的 `prepare` 拒绝、
+   `finalize` 改写产出），不是 `ctx.tools.execute`——agent-loop 不走 execute，真 agent
+   跑一轮 execute 命中 0 次（16）。`execute` 仍要包，它服务外部调用方（含评测框架）；
+   两条路径在 dsh 里各自直达同一份私有实现、不互相转发，所以一次调用只被裁决一次。
+9. **拒绝结果必须带 `error` 字段**。调度器把 `{ isError, error, …presentation }` 整体过
+   `snapshotJsonValue`，缺一个属性就判为有损；模型收到的不是我们写的拒绝理由，而是
+   「tool result must be losslessly JSON-serializable」（16，论证61 是它的机械对照）。
 
-代码：`thymus/src/gate.ts`（182 行），`thymus/src/eval-framework.ts`（318 行）。
+代码：`packages/thymus/src/gate.ts`（287 行），`packages/thymus/src/eval-framework.ts`（328 行），
+`packages/thymus/src/spec.ts`（242 行）。
 
 ---
 
@@ -57,6 +65,10 @@
 - 动态插件用不了 Node 定时器，要 `inject: ['timer']` + `ctx.timeout(ms)`；
   `idPrefix` 必须 3–6 位纯小写字母（14）。
 - 工具注册必须走 `harness.defineTool`，参数是扁平 DSL 不是 JSON Schema 嵌套（10）。
+- `ctx.tools.execute` 与 `ctx.tools[TOOL_RUNTIME_SCHEDULER]` 是两条并列入口，
+  agent-loop 只走后者；后者标了 `@internal`，dsh 没承诺它跨版本稳定（16）。
+- 成功结果一律经 `finalize`；走 `finish` 的是出错结果与 `prepare` 给出的 final-result，
+  两者都没有可脱敏的产出。`dispatch` 与 `finish` 的行为仍未测（16）。
 
 ### 评测框架
 
@@ -107,8 +119,10 @@
 - 判定结果落盘做题库——是建设不是验证，没做。
 - 抽检校准那一环这个 spike 里验不了（需真人真流量）。
 - 网关仍在同进程，是应用层逻辑不是边界。CC 靠操作系统文件权限做最高层，我们没有对应物。
-- 说话通道网关站在「我们自己发起装配」的路径上；真实部署里装配由 agent loop 做，
-  网关插在哪没验。
+- 说话通道的挂载点还没定。已验的只有「agent 正文确实过 `llm/stream`」（16）；
+  `gateSay` 仍是我们自己起一条假上游跑装配，不是插在 agent loop 的那条流上。
+  直接挂 `llm/stream` 会踩上面第 2 条（同侪抢位，论证12 里四种顺序输两种），
+  工具侧那种「站在链外」的对应物在说话侧是什么，要先探。
 - `run` 阶段换版失败不回滚，是 dsh 有意还是缺口——只记了现象，没读那段设计意图，
   也没向上游确认。
 
@@ -131,11 +145,12 @@
 - 发现 08–10：治理三连——谁决定加载、保护层不能同侪、判决聚合层
 - 发现 11–12：J-Space 评估、基线双峰与三条结论的撤回
 - 发现 13–15：多插件污染、热替换、静默失败
+- 发现 16：网关挂错了地方——agent 走调度器不走 `execute`（已按它改，见架构结论 8、9）
 - 配图：`constraint-holder-antipattern.svg` / `.png`
 
 ## 运行方式
 
-- 测试：`./thymus/run-tests.sh`（10 files / 92 passed）
+- 测试：`./thymus/run-tests.sh`（11 files / 112 passed）
 - 探针与实验：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
 - 花钱的脚本：`a2-ab` / `a2-feedback` / `a2-jspace` / `check-llm-optin` / `check-intact-damage`
 - 不花钱的：`check-a2-gradient` / `probe-selfunload` / `probe-protected-layer`

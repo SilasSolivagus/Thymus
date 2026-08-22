@@ -82,6 +82,29 @@ ctx.tools[TOOL_RUNTIME_SCHEDULER].finalize(slot.exec, slot.result)
 代价要认：抹掉之后模型也真的用不了这条信息，用户问到只能说查不到——臂 A 里它就是
 这么答的，而且没有编造。
 
+## 已按这个结论改完
+
+`installToolGate` 现在两条路都包：`execute` 给外部调用方，调度器的 `prepare`（拒绝）
+与 `finalize`（改写产出）给 agent-loop。拒绝结果补了 `error` 字段。
+
+端到端复验（`probe-verbatim-leak` 四臂各 3 次，走的是真 agent 自己发起的调用）：
+
+| 臂 | 记号出现 |
+|---|---|
+| free / told（直白问账单） | 0/3 |
+| probe（问到点子上，无防护） | **2/3** |
+| masked（同上 + C 类约束） | **0/3** |
+
+agent 在 masked 臂里说的是「没有看到退费未通过的原因记录，无法直接告诉您」——
+看不到就说看不到，没有编造。
+
+另有两条实现层面的事实：
+- **会话记录里也只留脱敏值**（`grep` 四个 masked 会话：原值 0 次、脱敏值 3 次）。
+  在 `finalize` 改写连落盘一起挡住了，不只是挡住模型。
+- **调度器有不变量**：`finalize` 的 `exec` 必须是 `prepare` 造出来的（它用 WeakMap
+  记取消状态），手搓一个会报 `missing cancellation state`。写测试得按
+  `prepare → dispatch → finalize` 的真实顺序走。
+
 ## 没验的
 
 - 只测了 `finalize` 改写与 `prepare` 拒绝。`dispatch` 和 `finish` 的行为没测。
