@@ -26,6 +26,7 @@ export {
   installSayGate,
   installToolGate,
   judgeText,
+  type Caller,
   type Constraint,
   type SayChannel,
   type ToolCall,

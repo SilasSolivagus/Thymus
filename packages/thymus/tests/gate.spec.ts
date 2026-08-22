@@ -25,7 +25,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
-import { installToolGate, installSayGate, gateSay, adjudicate, judgeText, type Constraint } from './thymus-src/gate.ts'
+import { installToolGate, installSayGate, gateSay, adjudicate, judgeText, type Constraint, type ToolCall } from './thymus-src/gate.ts'
 import { lastTurnOutcome } from './thymus-src/turn.ts'
 
 const SESSION = 'gate'
@@ -1066,5 +1066,164 @@ describe('说话通道网关 · 挂载点与拒绝语义', () => {
       ctx => { installSayGate(ctx, [counting], SAY_REPLACEMENT) },
     )
     expect(asked).toBe(1)                      // 只有收尾那一轮的正文被判，工具那轮零判定
+  })
+})
+
+// ── 调用方身份：B 类（认人前置）靠它按会话取事实（发现 18、19）──
+// 事实一律从**事件日志**读，不从当前 surface 读：压缩只动 surface，
+// 工具结果剪枝是追加一条盖上去，日志两边都只增不减。
+
+const VERIFY = 'verify_identity'
+const BILL = 'query_bill'
+
+const B_TOOLS: ToolDefinition[] = [
+  {
+    name: VERIFY, description: '核验来电人身份',
+    parameters: { type: 'object', properties: { phone: { type: 'string' } }, required: ['phone'] },
+    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v as string }] },
+    execute: (): Promise<string> => Promise.resolve('身份核验通过'),
+  },
+  {
+    name: BILL, description: '查询账单',
+    parameters: { type: 'object', properties: { account: { type: 'string' } }, required: ['account'] },
+    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v as string }] },
+    execute: (): Promise<string> => Promise.resolve('账期=2026-08 金额=30元'),
+  },
+]
+
+/** 会话里有没有成功做过身份核验。名字在 tool/call 上、成败在 tool/result 的结果块上，按 callId 对上。 */
+function verifiedFrom(events: readonly SessionEvent[]): boolean {
+  const ids = new Set<string>()
+  for (const ev of events) {
+    const e = ev as { type?: string; data?: Record<string, unknown> }
+    if (e.type === 'tool/call' && e.data?.name === VERIFY) ids.add(String(e.data.callId))
+    if (e.type !== 'tool/result') continue
+    const blocks = (e.data?.message as { content?: { type?: string; toolCallId?: string; isError?: boolean }[] } | undefined)?.content ?? []
+    for (const b of blocks) {
+      if (b.type === 'tool-result' && b.toolCallId !== undefined && ids.has(b.toolCallId) && b.isError !== true) return true
+    }
+  }
+  return false
+}
+
+const VERIFY_FIRST: Constraint = {
+  name: 'verify-first',
+  preTool: call => {
+    if (call.name !== BILL) return { kind: 'allow' }
+    if (call.caller === undefined) return { kind: 'deny', reason: '网关拒绝：这次调用没有身份' }
+    return verifiedFrom(call.caller.events)
+      ? { kind: 'allow' }
+      : { kind: 'deny', reason: '网关拒绝：本次会话尚未完成身份核验' }
+  },
+}
+
+/** 按 sessionId 分剧本、按轮次推进的假模型。 */
+class BScriptAdapter extends LlmAdapter {
+  private readonly counts = new Map<string, number>()
+  constructor(private readonly scripts: Map<string, 'verify-first' | 'straight'>) { super() }
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const sid = String((options as { sessionId?: string }).sessionId ?? '')
+    const n = this.counts.get(sid) ?? 0
+    this.counts.set(sid, n + 1)
+    const call = (id: string, name: string, args: string): StreamChunk[] => [
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(id), name, arguments: args } },
+      { type: 'finish', reason: { kind: 'tool-calls' } as never },
+    ]
+    if (this.scripts.get(sid) === 'verify-first' && n === 0) {
+      yield * call(`${sid}-v`, VERIFY, '{"phone":"138****0000"}')
+    } else if (n === 0 || (this.scripts.get(sid) === 'verify-first' && n === 1)) {
+      yield * call(`${sid}-b`, BILL, '{"account":"A1001"}')
+    } else {
+      yield * sayChunks('好的，已为您处理。')
+    }
+  }
+}
+
+/** 建一个装了 B 类约束的宿主。 */
+async function bootB(
+  scripts: Map<string, 'verify-first' | 'straight'>, seen?: ToolCall[], ran?: { bill: number },
+): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(Timer)
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  ctx.llm.registerAdapter(['fake'], new BScriptAdapter(scripts))
+  for (const t of B_TOOLS) {
+    ctx.tools.register(t.name === BILL && ran !== undefined
+      ? { ...t, execute: (): Promise<string> => { ran.bill++; return Promise.resolve('账期=2026-08 金额=30元') } }
+      : t)
+  }
+  const record: Constraint = { name: 'record', preTool: c => { seen?.push(c); return { kind: 'allow' } } }
+  installToolGate(ctx, seen === undefined ? [VERIFY_FIRST] : [record, VERIFY_FIRST])
+  return ctx
+}
+
+/** 跑一轮，返回账单调用有没有被拒。 */
+async function runB(ctx: Context, sid: string): Promise<boolean> {
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(sid), agentOptions: { provider: 'fake', model: 'fake' }, setup: async () => {},
+  })
+  const real = handle.agent
+  real.followup(createUserMessage({
+    content: [{ type: 'text', text: '我要查账单' }], source: { kind: 'user' },
+  }))
+  await real.whenIdle()
+  for (const ev of real.session.events as readonly SessionEvent[]) {
+    const e = ev as { type?: string; data?: Record<string, unknown> }
+    if (e.type !== 'tool/result') continue
+    const blocks = (e.data?.message as { content?: { content?: { text?: string }[] }[] } | undefined)?.content ?? []
+    for (const b of blocks) {
+      if ((b.content ?? []).some(c => c.text?.includes('尚未完成身份核验') === true)) return true
+    }
+  }
+  return false
+}
+
+describe('判决聚合层 · 调用方身份', () => {
+  it('论证78 preTool 拿得到 caller：sessionId 与 agent 一致，events 是那个会话的日志', async () => {
+    const seen: ToolCall[] = []
+    const ctx = await bootB(new Map([['b-id', 'verify-first' as const]]), seen)
+    await runB(ctx, 'b-id')
+    const bill = seen.find(c => c.name === BILL)
+    expect(bill?.caller?.sessionId).toBe('b-id')
+    expect(verifiedFrom(bill?.caller?.events ?? [])).toBe(true)   // 账单这一次调用时，核验的事实已经在日志里
+    const verify = seen.find(c => c.name === VERIFY)
+    expect(verifiedFrom(verify?.caller?.events ?? [])).toBe(false) // 核验那一次调用时还没有
+  })
+
+  it('论证79 B 类端到端：先认人放行，不认人拒绝', async () => {
+    // 放行那一臂要数工具体跑没跑——「没被拒」也可能是压根没发起调用
+    const okRan = { bill: 0 }
+    const okCtx = await bootB(new Map([['b-ok', 'verify-first' as const]]), undefined, okRan)
+    expect(await runB(okCtx, 'b-ok')).toBe(false)
+    expect(okRan.bill).toBe(1)
+
+    const badRan = { bill: 0 }
+    const badCtx = await bootB(new Map([['b-bad', 'straight' as const]]), undefined, badRan)
+    expect(await runB(badCtx, 'b-bad')).toBe(true)
+    expect(badRan.bill).toBe(0)          // 拒绝拦在 dispatch 之前，工具体一次没跑
+  })
+
+  it('论证80 多 agent 并发不串：各读各的会话日志', async () => {
+    const ctx = await bootB(new Map([['b-a', 'verify-first' as const], ['b-b', 'straight' as const]]))
+    const [a, b] = await Promise.all([runB(ctx, 'b-a'), runB(ctx, 'b-b')])
+    expect(a).toBe(false)
+    expect(b).toBe(true)
+  })
+
+  it('论证81 外部调用方没有 agent 时 caller 留空，按会话记事的约束据此拒绝', async () => {
+    const ctx = await bootB(new Map())
+    const res = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: CallId('b-noagent'), name: BILL, arguments: { account: 'A1001' },
+    })
+    expect(res.isError).toBe(true)
+    // 「没有身份」和「有身份但没记录」是两回事，理由必须分得开
+    expect((res as { error?: { message?: string } }).error?.message).toContain('没有身份')
   })
 })

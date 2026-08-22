@@ -59,6 +59,12 @@ installToolGate(ctx, constraints)
 installSayGate(ctx, constraints, 'Sorry — let me hand this to a human colleague.')
 ```
 
+A constraint that needs cross-call state — "no billing lookup before the caller is
+verified" — reads `call.caller` in `preTool`: the session id plus that session's event
+log. It stays a pure function of the log, so there is no private copy to drift.
+`caller` is absent when an external caller dispatches without an agent; a constraint
+that keys on the session must deny in that case rather than read absence as innocence.
+
 `installSayGate` wraps `ctx.llm.prepareCall`, buffers the whole stream, assembles it, and
 judges the assembled text — text and reasoning on separate channels, judged separately.
 A denied text block is replaced with the sentence you pass; a denied reasoning block is
@@ -91,6 +97,7 @@ These were not designed up front. Each one came out of a run where we thought so
 7. **Separate the agent that writes constraints from the agent being constrained**, and do not give the latter dynamic-plugin tools. On the speech side this is load-bearing, not hygiene: `prepareCall` is reachable from the sandbox, and whoever wraps it last is on the outside.
 8. **Mount the tool gate on the scheduler**, not on `ctx.tools.execute` — the agent loop never calls `execute`. Wrap `execute` too, for external callers.
 9. **Judge reasoning separately from text.** Judging the two concatenated hands the judge two different kinds of writing glued together; judging text alone lets a banned phrase through in the thinking block.
+10. **Read cross-call facts from the event log, not from the current surface.** Compaction only replaces the surface; tool-result pruning appends a replacement over it. The log itself only grows, and the facts survive a resume in a new host.
 
 ## What it does not provide
 

@@ -59,6 +59,11 @@ installToolGate(ctx, constraints)
 installSayGate(ctx, constraints, '抱歉，这个问题我需要转人工为您处理。')
 ```
 
+要跨调用记事的约束——「没认人之前不许查账单」这一类——在 `preTool` 里读 `call.caller`：
+会话身份加那个会话的事件日志。判定仍是日志的纯函数，没有自己那份副本，也就没有漂移。
+外部调用方不带 agent 时 `caller` 为空；按会话记事的约束在这种情况下应当拒绝，
+而不是把「没记录」当成「没违规」。
+
 `installSayGate` 包住 `ctx.llm.prepareCall`，整条流收完、装配后再裁决装配后的文本——
 正文与思考块分两条通道**各判一次**。正文被拒换成你传的那句话，思考块被拒整块丢掉。
 **这一轮不停**：同一条消息里的工具调用照常执行。`ctx.llm.stream` 不是可用的挂载点，
@@ -89,6 +94,7 @@ agent loop 走的是 `preparedCall.stream()`，那个入口一次都不响。
 7. **写约束的 agent 和被约束的业务 agent 必须分开**，业务 agent 不给动态插件工具。说话侧这一条是承重的，不是卫生条件：`prepareCall` 沙箱里够得到，后包的在外面。
 8. **工具通道网关挂调度器**，不是 `ctx.tools.execute`——agent loop 不走 execute。`execute` 也要包，它服务外部调用方。
 9. **reasoning 与正文分开判。** 拼成一段判，判定器拿到的是两段性质不同的文本粘在一起；只判正文，禁语会从思考块漏出。
+10. **跨调用的事实从事件日志读，不从当前 surface 读。** 压缩只替换 surface，工具结果剪枝是追加一条盖上去；日志本身只增不减，换宿主 resume 之后事实照样在。
 
 ## 它不提供什么
 

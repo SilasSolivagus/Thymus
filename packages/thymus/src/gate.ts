@@ -28,6 +28,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmCallConfig, PreparedLlmCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 /** 一条判决。没有 `ask`——这一层只做确定性裁决，要人介入是上层的事。 */
 export type Verdict = { kind: 'allow' } | { kind: 'deny'; reason: string }
@@ -49,16 +50,39 @@ function isVerdict(v: unknown): v is Verdict {
   return kind === 'deny' && typeof (v as { reason?: unknown }).reason === 'string'
 }
 
+/**
+ * 发起这次调用的一方。
+ *
+ * 跨调用记事的约束（「没认人之前不许查账单」这一类）靠它取事实：**从事件日志读，
+ * 不要从当前 surface 读**——压缩只动 surface，工具结果剪枝是追加一条盖上去，
+ * 日志两边都只增不减，换宿主 resume 之后事实照样在（发现 19）。
+ */
+export interface Caller {
+  /** 会话身份，与 `agent.id` 同值。 */
+  sessionId: string
+  /** 这个会话到此刻为止的事件日志。 */
+  events: readonly SessionEvent[]
+}
+
 /** 一次工具调用里裁决者看得到的部分。 */
 export interface ToolCall {
   name: string
   arguments: Record<string, unknown>
+  /**
+   * 发起方。**可能没有**：外部调用方不带 agent 时就没有身份可给
+   * （评测框架自己发起的调用即是）。要按会话记事的约束在这种情况下应当拒绝，
+   * 而不是当成「没记录＝没违规」。
+   */
+  caller?: Caller
 }
 
 /** 一条约束。三个位置各自可选，只实现关心的那个。 */
 export interface Constraint {
   name: string
-  /** 派发之前裁决一次工具调用。 */
+  /**
+   * 派发之前裁决一次工具调用。
+   * 要按会话记事就读 `call.caller`——它可能没有，那种情况下应当拒绝。
+   */
   preTool?: (call: ToolCall) => Verdict | Promise<Verdict>
   /**
    * 改写工具产出，在结果交回调用方**之前**生效——所以模型看到的就是改写后的。
@@ -126,6 +150,32 @@ interface ToolResult {
   value?: unknown
 }
 
+/** dsh 那边一次执行里这一层读得到的字段。 */
+interface ExecutionView {
+  name: string
+  arguments?: unknown
+  agent?: { id?: string; session?: { events?: readonly SessionEvent[] } }
+}
+
+/**
+ * 从一次执行里取裁决者看得到的部分。
+ *
+ * 身份来自 `exec.agent`：调度器路径上 agent-loop 会填好它，`agent.id` 就是 sessionId，
+ * 顺着 `agent.session.events` 拿得到整条会话日志（发现 18）。外部调用方不带 agent 时
+ * `caller` 留空，而不是编一个空会话——「没有身份」和「有身份但没记录」必须能分开。
+ */
+function toolCallOf(exec: ExecutionView): ToolCall {
+  const args = exec.arguments
+  const call: ToolCall = {
+    name: exec.name,
+    arguments: typeof args === 'object' && args !== null ? args as Record<string, unknown> : {},
+  }
+  const id = exec.agent?.id
+  const events = exec.agent?.session?.events
+  if (id === undefined || events === undefined) return call
+  return { ...call, caller: { sessionId: id, events } }
+}
+
 /**
  * 构造一个拒绝结果。**`error` 必须给**：调度器把 `{ isError, error, …presentation }`
  * 整体过 `snapshotJsonValue`，对象里带一个 `undefined` 属性就判为有损，抛
@@ -158,16 +208,16 @@ export function installToolGate(
   ctx: Context, constraints: readonly Constraint[], timeoutMs?: number,
 ): void {
   const runtime = ctx.tools as unknown as Record<string | symbol, unknown>
-  const preVerdict = async (name: string, args: Record<string, unknown>): Promise<Verdict> =>
-    adjudicate(constraints, c => c.preTool?.({ name, arguments: args }), timeoutMs)
+  const preVerdict = async (call: ToolCall): Promise<Verdict> =>
+    adjudicate(constraints, c => c.preTool?.(call), timeoutMs)
 
   // 路径一：`ctx.tools.execute`——外部调用方走这条。
   const innerExecute = (runtime.execute as (c: never) => Promise<ToolResult>).bind(ctx.tools)
   runtime.execute = async (call: never): Promise<ToolResult> => {
-    const { name, arguments: args } = call as unknown as ToolCall
-    const verdict = await preVerdict(name, args)
+    const toolCall = toolCallOf(call as unknown as ExecutionView)
+    const verdict = await preVerdict(toolCall)
     if (verdict.kind === 'deny') return denyResult(verdict.reason)
-    return rewriteResult(constraints, { name, arguments: args }, await innerExecute(call))
+    return rewriteResult(constraints, toolCall, await innerExecute(call))
   }
 
   // 路径二：调度器——**agent-loop 走这条，而且不经过 execute**（实测两条完全独立）。
@@ -175,9 +225,9 @@ export function installToolGate(
   const sched = runtime[TOOL_RUNTIME_SCHEDULER] as Record<string, (...a: never[]) => unknown>
   const innerPrepare = sched.prepare!.bind(sched)
   sched.prepare = async (...a: never[]): Promise<unknown> => {
-    const exec = a[0] as unknown as { name: string; arguments?: Record<string, unknown> }
+    const exec = a[0] as unknown as ExecutionView
     const prepared = await innerPrepare(...a) as { kind: string; exec: unknown }
-    const verdict = await preVerdict(exec.name, exec.arguments ?? {})
+    const verdict = await preVerdict(toolCallOf(exec))
     // 工具体在 dispatch 阶段才跑，所以这里拒绝仍然拦得住它执行。
     return verdict.kind === 'deny'
       ? { kind: 'final-result', exec: prepared.exec, result: denyResult(verdict.reason) }
@@ -185,9 +235,9 @@ export function installToolGate(
   }
   const innerFinalize = sched.finalize!.bind(sched)
   sched.finalize = async (...a: never[]): Promise<unknown> => {
-    const exec = a[0] as unknown as { name: string; arguments?: Record<string, unknown> }
+    const exec = a[0] as unknown as ExecutionView
     const result = await innerFinalize(...a) as ToolResult
-    return rewriteResult(constraints, { name: exec.name, arguments: exec.arguments ?? {} }, result)
+    return rewriteResult(constraints, toolCallOf(exec), result)
   }
 }
 

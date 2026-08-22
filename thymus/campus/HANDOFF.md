@@ -131,7 +131,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   断言看的是**模型在下一轮请求里实际收到的 tool-result**，不是我们自己的返回值
   （论证59–63，不花钱）。四条对照：老写法在真 agent 上 execute 命中 0 次、
   无网关时内部字段确实漏、缺 `error` 时拒绝理由被换成序列化错误发给模型、
-  抹除只动该动的字段。测试 11 files / 126 passed。
+  抹除只动该动的字段。测试 11 files / 130 passed。
 
 - **说话侧挂载点——已探，见发现 17**（`probe-say-mount.ts`，脚本化 adapter，不花钱）。
   `ctx.llm.stream` 命中 0 次，是第二个 `execute`；agent 走 `preparedCall.stream()`。
@@ -149,7 +149,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   验收八条走真 agent 路径（论证69–77，脚本化 adapter，不花钱）：挂 `ctx.llm.stream`
   命中 0 次的对照、无网关时禁语落库的阳性对照、`assistant/chunk` 里也没有禁语
   （证明没先放行再改）、reasoning 分开判且不与正文拼接、只判正文会漏的对照、
-  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 11 files / 126 passed。
+  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 11 files / 130 passed。
 
 - **B 类的状态——已探，见发现 18**（`probe-b-state.ts`）。三条结论：
   状态**不用自己存**，从 `agent.session.events` 现读就够（`tool/call` 的名字与
@@ -164,10 +164,18 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   但方向要记牢：**从事件日志读，不要从 surface 读**——改成读 surface，剪枝就开始影响判定。
   顺带一个操作性现象：`dispose()` 之后立刻 resume 会报 `session not found`，等 300ms 才行。
 
-**下一步（B 类，实现）**：先改接口——`Constraint.preTool` 的入参要带调用方身份
-（sessionId 或整个 agent），否则约束够不到会话，B 类落不了地。这是个会动到已发布类型的
-改动，A/C 两类不需要它，所以要想清楚是加可选字段还是换一个上下文参数。
-之后 B 类约束写成纯函数：输入会话日志，输出判决。
+- **preTool 的调用方身份——已加**。`ToolCall` 多一个可选的 `caller`
+  （`{ sessionId, events }`），从 `exec.agent` 取：调度器路径上 agent-loop 会填好它。
+  选可选字段而不是加第二个参数，是因为 `postTool` 用的是同一个 `ToolCall`，
+  加在这里两处都拿得到，且既有约束一行不用改。外部调用方不带 agent 时 `caller` 留空，
+  不编一个空会话——「没有身份」和「有身份但没记录」必须分得开（论证81）。
+  验收四条（论证78–81）：账单那次调用看得到核验事实、核验那次还看不到；
+  端到端先认人放行（且工具体确实跑了 1 次）／不认人拒绝（工具体 0 次）；
+  两个 agent 并发各读各的；无身份时按理由拒绝。
+
+**下一步（B 类，实现）**：约束的声明形式（`src/spec.ts`）还没有 B 类。
+要定的是声明长什么样——「哪个工具需要前置」「前置条件是哪个工具成功过」这种数据形式，
+以及它的验收用例怎么写（B 类的用例是多步的，现有 `deny`/`allow`/`heldout` 都是单句）。
 
 说话侧剩下两个没量的：缓冲全流对首字延迟的代价、多 agent 并发下这一层过不过得干净。
 
@@ -234,7 +242,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 ## 运行方式
 
 - 探针/demo：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
-- 测试：`./thymus/run-tests.sh`（应为 11 files / 126 passed）
+- 测试：`./thymus/run-tests.sh`（应为 11 files / 130 passed）
 - `spec-plugins.ts` 顶层已改为「仅直接执行时运行」。**其他 campus 脚本不要 import 它**
   之外的实验脚本前先确认同样有这个判断——曾因顶层无条件 `main()` 被 import 触发重跑，
   覆盖过冻结的 `evals.json`（从 `../trajectories/_no-cwd/campus-author/session.jsonl`

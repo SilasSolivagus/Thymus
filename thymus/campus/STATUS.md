@@ -3,7 +3,7 @@
 19 份 FINDINGS 里有若干条已被后来的实验推翻或降级。**只读某一份会踩到作废的结论**，
 所以先读这份，再按需要跳转。
 
-最后更新：验完压缩对 B 类事实源的影响之后。测试 `./thymus/run-tests.sh` 应为 11 files / 126 passed。
+最后更新：验完压缩对 B 类事实源的影响之后。测试 `./thymus/run-tests.sh` 应为 11 files / 130 passed。
 
 ---
 
@@ -54,9 +54,11 @@
     不自己存一份，也就没有「自己那份和会话不一致」的漂移。代价是并发派发时
     前一个调用的结果还没落库，合法的批量调用会被拒——方向是 fail-closed（18）。
     **从事件日志读，不要从 surface 读**：压缩与剪枝都只动 surface、日志只增不减，
-    换宿主 resume 之后事实照样在（19）。
+    换宿主 resume 之后事实照样在（19）。身份走 `ToolCall.caller`（sessionId + 事件日志）；
+    它**可能为空**（外部调用方不带 agent），那时按会话记事的约束应当拒绝——
+    「没有身份」和「有身份但没记录」要分得开（论证81）。
 
-代码：`packages/thymus/src/gate.ts`（391 行），`packages/thymus/src/eval-framework.ts`（328 行），
+代码：`packages/thymus/src/gate.ts`（441 行），`packages/thymus/src/eval-framework.ts`（328 行），
 `packages/thymus/src/spec.ts`（242 行）。
 
 ---
@@ -150,7 +152,6 @@
 
 ## 仍未验证
 
-- `Constraint.preTool` 的入参还没加调用方身份，B 类因此还落不了地（18）。
 
 - 超时默认 10 秒是拍的，没按真实判定延迟分布校准（实测单次 0.8–1.6 秒，余量约 6 倍）。
 - 字面约束那一类的多插件能力没验（要花钱跑模型）。
@@ -192,7 +193,7 @@
 
 ## 运行方式
 
-- 测试：`./thymus/run-tests.sh`（11 files / 126 passed）
+- 测试：`./thymus/run-tests.sh`（11 files / 130 passed）
 - 探针与实验：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
 - 花钱的脚本：`a2-ab` / `a2-feedback` / `a2-jspace` / `check-llm-optin` / `check-intact-damage`
 - 不花钱的：`check-a2-gradient` / `probe-selfunload` / `probe-protected-layer` /
