@@ -26,15 +26,36 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmCallConfig, PreparedLlmCall, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
-/** 一条判决。没有 `ask`——这一层只做确定性裁决，要人介入是上层的事。 */
-export type Verdict = { kind: 'allow' } | { kind: 'deny'; reason: string }
+/**
+ * 一条判决。没有 `ask`——这一层只做确定性裁决，要人介入是上层的事。
+ *
+ * `deny` 可以自带 `replacement`：「必须走兜底」这类约束知道该改说什么，
+ * 而网关的通用替代话术不知道。给了就用它，没给才用网关那句。
+ */
+export type Verdict =
+  | { kind: 'allow' }
+  | { kind: 'deny'; reason: string; replacement?: string }
 
 /** 说话通道分两条：说给用户看的正文，和模型的思考块。 */
 export type SayChannel = 'text' | 'reasoning'
+
+/**
+ * 裁决一段话时的会话上下文。
+ *
+ * 有的规矩光看这一句判不了：「越界必须转出」要先知道用户问的是什么。
+ * 运行时网关这一层拿得到——它包的是 `stream(options)`，`options.messages`
+ * 就是这次发给模型的完整对话。**拿不到上下文时是 `undefined`**
+ * （`gateSay` 那条单句判定的路径就没有），要上下文的约束应当据此拒绝，
+ * 而不是当成「没有上下文＝没有越界」。
+ */
+export interface SayContext {
+  /** 这次请求发给模型的完整对话。注意工具结果的 `role` 也是 `user`，靠 `source.kind` 区分。 */
+  messages: readonly Message[]
+}
 
 /** 一条约束多久不给判决就按 deny 计。挂住的约束不能变成放行。 */
 export const DEFAULT_VERDICT_TIMEOUT_MS = 10_000
@@ -47,7 +68,9 @@ function isVerdict(v: unknown): v is Verdict {
   if (typeof v !== 'object' || v === null) return false
   const kind = (v as { kind?: unknown }).kind
   if (kind === 'allow') return true
-  return kind === 'deny' && typeof (v as { reason?: unknown }).reason === 'string'
+  if (kind !== 'deny' || typeof (v as { reason?: unknown }).reason !== 'string') return false
+  const replacement = (v as { replacement?: unknown }).replacement
+  return replacement === undefined || typeof replacement === 'string'
 }
 
 /**
@@ -107,7 +130,7 @@ export interface Constraint {
    * `channel` 区分正文与思考块，两条**分开送来、各判一次**：拼成一段判，判定器拿到的是
    * 两段性质不同的文本粘在一起（发现 17 第五节）。只判正文则禁语会从思考块原样漏出。
    */
-  say?: (text: string, channel: SayChannel) => Verdict | Promise<Verdict>
+  say?: (text: string, channel: SayChannel, context?: SayContext) => Verdict | Promise<Verdict>
 }
 
 /**
@@ -377,6 +400,8 @@ export async function gateSay(
   const assembler = new BlockAssembler()
   for await (const chunk of stream) assembler.push(chunk)
   const assembled = assembler.blocks().filter(b => b.type === 'text').map(b => b.text).join('')
+  // 这条路径没有会话上下文：假上游是我们自己起的，`messages` 是空的。
+  // 不传 `context` 而不是传一个空对话——要上下文的约束得能分清「没有」和「空」。
   return { verdict: await adjudicate(constraints, c => c.say?.(assembled, 'text'), timeoutMs), assembled }
 }
 
@@ -441,8 +466,11 @@ interface LlmEntry {
  *   - **必须整条流收完再决定**：agent loop 每收一个 chunk 就落一条 `assistant/chunk`，
  *     先放行再改就晚了——事件已落库、流式 UI 已经渲染过。
  *
- * 拒绝的语义：正文换成 `replacement`，思考块整块丢掉，**这一轮不停**——同一条消息里的
+ * 拒绝的语义：正文换成替代话术，思考块整块丢掉，**这一轮不停**——同一条消息里的
  * 工具调用照常发出、照常执行。要连带停轮是上层的事，这一层不做。
+ * 替代话术优先用判决自带的（`Verdict.replacement`），没有才用这里的 `replacement`。
+ *
+ * 裁决时把这次请求的完整对话作为 {@link SayContext} 交给约束——有的规矩光看这一句判不了。
  *
  * 限制，用之前先认：`prepareCall` 这个入口沙箱里的动态插件也够得到，后包的在外面。
  * 所以这道网关拦得住话，拦不住一个能挂动态插件的业务 agent（发现 17 臂 C）。
@@ -476,13 +504,16 @@ export function installSayGate(
         const reasoning = joinBlocks(blocks, 'reasoning')
         // 两条通道分开判，并行取判决——延迟取慢的那条，不累加。空的那条不判：
         // 没说话就没有可裁决的对象，也省掉一次语义判定的模型调用。
+        const context: SayContext = { messages: options.messages }
         const [textVerdict, reasoningVerdict] = await Promise.all([
-          text === '' ? ALLOW : adjudicate(constraints, c => c.say?.(text, 'text'), timeoutMs),
-          reasoning === '' ? ALLOW : adjudicate(constraints, c => c.say?.(reasoning, 'reasoning'), timeoutMs),
+          text === '' ? ALLOW : adjudicate(constraints, c => c.say?.(text, 'text', context), timeoutMs),
+          reasoning === '' ? ALLOW : adjudicate(constraints, c => c.say?.(reasoning, 'reasoning', context), timeoutMs),
         ])
         const denied = { text: textVerdict.kind === 'deny', reasoning: reasoningVerdict.kind === 'deny' }
         if (!denied.text && !denied.reasoning) { yield * buffered; return }
-        yield * rewriteSay(buffered, denied, replacement)
+        // 约束自带的替代话术优先：它知道该改说什么，网关那句是兜底的兜底。
+        const say = textVerdict.kind === 'deny' ? textVerdict.replacement ?? replacement : replacement
+        yield * rewriteSay(buffered, denied, say)
       })(),
     }
   }

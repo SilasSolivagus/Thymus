@@ -131,7 +131,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   断言看的是**模型在下一轮请求里实际收到的 tool-result**，不是我们自己的返回值
   （论证59–63，不花钱）。四条对照：老写法在真 agent 上 execute 命中 0 次、
   无网关时内部字段确实漏、缺 `error` 时拒绝理由被换成序列化错误发给模型、
-  抹除只动该动的字段。测试 11 files / 138 passed。
+  抹除只动该动的字段。测试 11 files / 151 passed。
 
 - **说话侧挂载点——已探，见发现 17**（`probe-say-mount.ts`，脚本化 adapter，不花钱）。
   `ctx.llm.stream` 命中 0 次，是第二个 `execute`；agent 走 `preparedCall.stream()`。
@@ -149,7 +149,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   验收八条走真 agent 路径（论证69–77，脚本化 adapter，不花钱）：挂 `ctx.llm.stream`
   命中 0 次的对照、无网关时禁语落库的阳性对照、`assistant/chunk` 里也没有禁语
   （证明没先放行再改）、reasoning 分开判且不与正文拼接、只判正文会漏的对照、
-  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 11 files / 138 passed。
+  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 11 files / 151 passed。
 
 - **B 类的状态——已探，见发现 18**（`probe-b-state.ts`）。三条结论：
   状态**不用自己存**，从 `agent.session.events` 现读就够（`tool/call` 的名字与
@@ -184,8 +184,20 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   代价是 spec 的用例不覆盖解析那一层（写进了 `checkSpecEvals` 的文档）。
   论证82–89，138 passed。
 
-**下一步**：四类约束（A禁语 / B认人前置 / C内部字段不外泄 / D越界兜底）里 D 还没做。
-另外说话侧还欠两个没量的：缓冲全流对首字延迟的代价、多 agent 并发下那一层过不过得干净。
+- **D 类 `require-fallback`——已做**。四类到齐。它跟前三类不是同一个形状：前三类是禁止，
+  它是**有条件的正向义务**（当提问越界，回复必须转出），而且光看回复判不了。
+  为此 `Constraint.say` 加了第三个可选参数 `SayContext`（这次请求的完整对话），
+  运行时网关拿得到（论证90 实测），`gateSay` 那条单句路径没有，拿不到时按拒绝计。
+  判决新增可选 `replacement`，网关优先用它——顺带把「拒绝时说什么」那个悬着的问题解掉。
+  判定两跳（越界吗 → 兜底了吗）合成一次调用，三选一，含糊按未兜底计。
+  论证94–102，151 passed。
+
+**下一步**：
+1. **D 类要真模型跑一次留出集**（要花钱）。假 adapter 只证明了机制通，判定器判不判得住
+   是另一回事——它比 A2 多一跳推理。判不住就是能力边界，如实记进 FINDINGS，不改题迁就。
+2. 说话侧还欠两个没量的：缓冲全流对首字延迟的代价、多 agent 并发下那一层过不过得干净。
+3. 四类凑齐了，可以把 SPEC.md 那份真实客户材料整份编译成声明跑一遍验收，看填表这条路
+   到底填不填得满——这是本轮命题（「过去要人写的插件能不能换成一份声明」）的收口动作。
 
 说话侧剩下两个没量的：缓冲全流对首字延迟的代价、多 agent 并发下这一层过不过得干净。
 
@@ -252,7 +264,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 ## 运行方式
 
 - 探针/demo：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
-- 测试：`./thymus/run-tests.sh`（应为 11 files / 138 passed）
+- 测试：`./thymus/run-tests.sh`（应为 11 files / 151 passed）
 - `spec-plugins.ts` 顶层已改为「仅直接执行时运行」。**其他 campus 脚本不要 import 它**
   之外的实验脚本前先确认同样有这个判断——曾因顶层无条件 `main()` 被 import 触发重跑，
   覆盖过冻结的 `evals.json`（从 `../trajectories/_no-cwd/campus-author/session.jsonl`

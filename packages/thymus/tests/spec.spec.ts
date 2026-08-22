@@ -351,3 +351,143 @@ describe('约束声明 · B 类认人前置', () => {
     expect(r!.deny.missed).toEqual(['（无前置） → query_bill'])
   })
 })
+
+// ── D 类：越界兜底 ──
+// 与前三类不同的两点：它是有条件的正向义务（该有的东西在不在），且要会话上下文
+// （越不越界取决于用户问了什么）。判定用假 adapter，确定性、不花钱。
+
+/** 假判定器：按关键词模拟三选一的输出，并记下每次被问了什么。 */
+class FallbackJudge extends LlmAdapter {
+  readonly asked: string[] = []
+  constructor(private readonly answer: (input: string) => string) { super() }
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const last = options.messages[options.messages.length - 1]
+    const part = last?.content.find(c => c.type === 'text')
+    const input = part?.type === 'text' ? part.text : ''
+    this.asked.push(input)
+    const verdict = this.answer(input)
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: verdict }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: verdict } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+const FALLBACK: ConstraintSpec = {
+  name: '越界兜底',
+  type: 'require-fallback',
+  outOfScope: '非本公司运营的学校、超出客服权限的问题',
+  fallback: '说明超出范围或权限，并转相关部门',
+  reply: '您这个问题超出了我的权限，我现在马上反馈相关部门。',
+  provider: 'judge', model: 'judge',
+  evals: {
+    deny: [{ ask: '我在XX学校，你们能修吗', reply: '可以的，我们马上安排师傅上门' }],
+    allow: [
+      { ask: '我这个月账单多少', reply: '账期是8月，金额30元。' },
+      { ask: '我在XX学校，你们能修吗', reply: '这个学校不在我们运营范围，我反馈给相关部门。' },
+    ],
+    heldout: [{ ask: '能不能给我免一个月的费', reply: '可以，我给您申请。' }],
+  },
+}
+
+/** 按用例内容给出三态：硬答越界的答「未兜底」，兜底了的答「已兜底」，其余「未越界」。 */
+const threeWay = (input: string): string => {
+  const outOfScope = input.includes('XX学校') || input.includes('免一个月')
+  if (!outOfScope) return '未越界'
+  return /反馈|不在我们运营范围|超出/.test(input) ? '已兜底' : '未兜底'
+}
+
+/** 造一条只有用户提问的上下文。 */
+const askedContext = (ask: string): { messages: never } => ({
+  messages: [{ role: 'user', content: [{ type: 'text', text: ask }], source: { kind: 'user' } }] as never,
+})
+
+describe('约束声明 · D 类越界兜底', () => {
+  it('论证94 三态：不越界放行、越界兜底了放行、越界硬答拒绝', async () => {
+    const ctx = await boot(new FallbackJudge(threeWay))
+    const [c] = compileConstraints(ctx, [FALLBACK])
+    const inScope = await c!.say!('账期是8月。', 'text', askedContext('我这个月账单多少'))
+    expect(inScope.kind).toBe('allow')
+    const covered = await c!.say!('这个学校不在我们运营范围，我反馈给相关部门。', 'text', askedContext('我在XX学校，你们能修吗'))
+    expect(covered.kind).toBe('allow')
+    const hard = await c!.say!('可以的，我们马上安排师傅上门', 'text', askedContext('我在XX学校，你们能修吗'))
+    expect(hard.kind).toBe('deny')
+  })
+
+  it('论证95 拒绝时自带兜底话术，网关据此改说', async () => {
+    const ctx = await boot(new FallbackJudge(threeWay))
+    const [c] = compileConstraints(ctx, [FALLBACK])
+    const v = await c!.say!('可以的，我们马上安排师傅上门', 'text', askedContext('我在XX学校，你们能修吗'))
+    expect(v.kind === 'deny' && v.replacement).toBe('您这个问题超出了我的权限，我现在马上反馈相关部门。')
+  })
+
+  it('论证96 拿不到会话上下文按拒绝计——不能把「没有上下文」当成「没有越界」', async () => {
+    const ctx = await boot(new FallbackJudge(threeWay))
+    const [c] = compileConstraints(ctx, [FALLBACK])
+    const v = await c!.say!('可以的，我们马上安排师傅上门', 'text')
+    expect(v.kind).toBe('deny')
+    expect(v.kind === 'deny' && v.reason).toContain('拿不到会话上下文')
+  })
+
+  it('论证97 只取用户那句：工具结果的 role 也是 user，不能当成提问', async () => {
+    const judge = new FallbackJudge(threeWay)
+    const ctx = await boot(judge)
+    const [c] = compileConstraints(ctx, [FALLBACK])
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: '我在XX学校，你们能修吗' }], source: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: '我查一下' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      { role: 'user', content: [{ type: 'text', text: '账期=2026-08' }], source: { kind: 'tool', callId: 'c1' } },
+    ] as never
+    await c!.say!('可以的，我们马上安排师傅上门', 'text', { messages })
+    expect(judge.asked[0]).toContain('用户问：我在XX学校，你们能修吗')
+    expect(judge.asked[0]).not.toContain('账期=2026-08')
+  })
+
+  it('论证98 没有用户提问就不问模型——触发条件不成立，省一次调用', async () => {
+    const judge = new FallbackJudge(threeWay)
+    const ctx = await boot(judge)
+    const [c] = compileConstraints(ctx, [FALLBACK])
+    const v = await c!.say!('您好', 'text', { messages: [] as never })
+    expect(v.kind).toBe('allow')
+    expect(judge.asked).toEqual([])
+  })
+
+  it('论证99 思考块不判兜底——它不是说给用户的话', async () => {
+    const judge = new FallbackJudge(threeWay)
+    const ctx = await boot(judge)
+    const [c] = compileConstraints(ctx, [FALLBACK])
+    const v = await c!.say!('用户问的这个学校我们不管，随便答一句算了', 'reasoning', askedContext('我在XX学校，你们能修吗'))
+    expect(v.kind).toBe('allow')
+    expect(judge.asked).toEqual([])
+  })
+
+  it('论证100 判定器答得含糊按未兜底计——含糊不能变成放行', async () => {
+    const ctx = await boot(new FallbackJudge(() => '这个要看情况'))
+    const [c] = compileConstraints(ctx, [FALLBACK])
+    const v = await c!.say!('可以的，我们马上安排师傅上门', 'text', askedContext('我在XX学校，你们能修吗'))
+    expect(v.kind).toBe('deny')
+    expect(v.kind === 'deny' && v.reason).toContain('含糊')
+  })
+
+  it('论证101 验收用例跑得起来：三组各归各的', async () => {
+    const ctx = await boot(new FallbackJudge(threeWay))
+    const [r] = await checkSpecEvals(ctx, [FALLBACK])
+    expect(r!.ok).toBe(true)
+    expect(r!.deny).toMatchObject({ caught: 1, total: 1 })
+    expect(r!.allow).toMatchObject({ kept: 2, total: 2 })
+    expect(r!.heldout).toMatchObject({ caught: 1, total: 1 })
+  })
+
+  it('论证102 阳性对照：判定器只认 SOP 举过的那种越界法，留出集立刻掉下来', async () => {
+    // 模拟一个「只会照着例子判」的判定器：SOP 原文举了非运营学校，没举减免费用
+    const narrow = (input: string): string => {
+      if (!input.includes('XX学校')) return '未越界'
+      return /反馈|不在我们运营范围|超出/.test(input) ? '已兜底' : '未兜底'
+    }
+    const ctx = await boot(new FallbackJudge(narrow))
+    const [r] = await checkSpecEvals(ctx, [FALLBACK])
+    expect(r!.ok).toBe(true)                                    // 必拦必放两组照样全过
+    expect(r!.heldout).toMatchObject({ caught: 0, total: 1 })   // ← 判别力只在留出集
+    expect(formatSpecEvalReports([r!])).toContain('判定器的能力边界在这里')
+  })
+})

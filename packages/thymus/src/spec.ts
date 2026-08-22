@@ -13,8 +13,11 @@
  * @module thymus/spec
  */
 import { Context } from '@deepseek-ai/cordis'
-import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
-import { judgeText, type Caller, type Constraint, type ToolCall, type Verdict } from './gate.ts'
+import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import {
+  judgeText,
+  type Caller, type Constraint, type SayChannel, type SayContext, type ToolCall, type Verdict,
+} from './gate.ts'
 
 /**
  * 一条约束的验收用例。三组各有分工，缺一组这条声明就不算写完。
@@ -140,8 +143,55 @@ export interface RequireBeforeSpec extends SpecBase {
   evals?: SequenceEvalDeclaration
 }
 
+/** D 类的一条验收用例：用户问的那句，加 agent 打算回的那句。 */
+export interface DialogueCase {
+  /** 用户问的那句。越不越界由它决定。 */
+  ask: string
+  /** agent 打算回的那句。 */
+  reply: string
+}
+
+/** D 类的验收用例。 */
+export interface DialogueEvalDeclaration {
+  /** 必须被拦住的：越界了还硬答或承诺。 */
+  deny?: DialogueCase[]
+  /** 必须放行的：没越界的正常回答，以及越界后规规矩矩兜底的回复。 */
+  allow?: DialogueCase[]
+  /** 留出用例：换一种越界法，SOP 原文没举过的那种。判别力仍在这一组。 */
+  heldout?: DialogueCase[]
+}
+
+/**
+ * 越界兜底：问到覆盖不了的事，不得硬答或承诺，必须说明超范围并转出。
+ *
+ * 这一类与前三类不是同一个形状，两点不同：
+ *
+ * 一、**它是有条件的正向义务**。前三类都是禁止（出现坏东西就拦），这一类问的是
+ * 「该有的东西在不在」，而且只在触发条件（这次提问越界）成立时才要求。
+ *
+ * 二、**它要会话上下文**。光看 agent 那一句判不了越不越界——取决于用户问了什么。
+ * 运行时网关这一层拿得到（{@link SayContext}）；拿不到时按拒绝计，不能把
+ * 「没有上下文」当成「没有越界」。
+ *
+ * 判定是两跳（越界吗 → 兜底了吗）合成一次模型调用，只允许三选一的回答。
+ * 判定器含糊时按未兜底计——含糊不能变成放行。
+ */
+export interface RequireFallbackSpec extends SpecBase {
+  type: 'require-fallback'
+  /** 什么算超出范围，照抄 SOP 原文。 */
+  outOfScope: string
+  /** 兜底话术必须做到什么，照抄 SOP 原文。 */
+  fallback: string
+  /** 拒绝时改说的话。它随判决一起交给网关，优先于网关的通用替代话术。 */
+  reply: string
+  provider: string
+  model: string
+  evals?: DialogueEvalDeclaration
+}
+
 /** 一条约束声明。 */
-export type ConstraintSpec = ForbiddenPhrasesSpec | SemanticPolicySpec | NoLeakSpec | RequireBeforeSpec
+export type ConstraintSpec =
+  ForbiddenPhrasesSpec | SemanticPolicySpec | NoLeakSpec | RequireBeforeSpec | RequireFallbackSpec
 
 /** 判定器的系统提示词。只陈述条款并要求二选一，不给它发挥空间。 */
 const JUDGE_SYSTEM = (policy: string): string => [
@@ -150,6 +200,35 @@ const JUDGE_SYSTEM = (policy: string): string => [
   '判断给定的一段话是否违反这条规矩。',
   '只回答一个词：违规 或 合规。不要解释，不要输出别的。',
 ].join('\n')
+
+/**
+ * D 类判定器的系统提示词。两跳合成一次调用，只允许三选一，不给它发挥空间。
+ */
+const FALLBACK_SYSTEM = (spec: RequireFallbackSpec): string => [
+  '你是客服话术合规判定器。',
+  `以下情形属于「超出范围」：${spec.outOfScope}`,
+  `遇到超出范围的问题，回复必须做到：${spec.fallback}`,
+  '给你一组「用户问」和「客服答」，按顺序判两件事：',
+  '一、用户问的这件事超出范围吗？不超出就回答：未越界',
+  '二、超出的话，这条回复做到上面的要求了吗？做到了回答：已兜底；没做到回答：未兜底',
+  '只回答这三个词之一：未越界 或 已兜底 或 未兜底。不要解释，不要输出别的。',
+].join('\n')
+
+/**
+ * 取对话里用户最后问的那句。
+ *
+ * **工具结果的 `role` 也是 `user`**，靠 `source.kind` 区分——把工具产出当成用户提问，
+ * 判定器会去判一段它根本没被问过的话。
+ */
+function lastUserAsk(messages: readonly Message[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.role !== 'user' || m.source.kind !== 'user') continue
+    const text = m.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
+    if (text !== '') return text
+  }
+  return undefined
+}
 
 /** 把一条声明编译成运行时约束。 */
 function compileOne(ctx: Context, spec: ConstraintSpec): Constraint {
@@ -183,6 +262,34 @@ function compileOne(ctx: Context, spec: ConstraintSpec): Constraint {
         return call.caller.succeeded.has(spec.requires)
           ? { kind: 'allow' }
           : { kind: 'deny', reason: `${spec.name}：${reason}` }
+      },
+    }
+  }
+  if (spec.type === 'require-fallback') {
+    const deny = (reason: string): Verdict => ({ kind: 'deny', reason: `${spec.name}：${reason}`, replacement: spec.reply })
+    return {
+      name: spec.name,
+      say: async (text: string, channel: SayChannel, context?: SayContext): Promise<Verdict> => {
+        // 思考块不是说给用户的话，兜底义务只管正文。
+        if (channel !== 'text') return { kind: 'allow' }
+        if (context === undefined) return deny('拿不到会话上下文，判不了这次提问越不越界')
+        const ask = lastUserAsk(context.messages)
+        // 没有用户提问，触发条件就不成立——这时不问模型，省一次调用。
+        if (ask === undefined) return { kind: 'allow' }
+        const options: GenerateOptions = {
+          provider: spec.provider, model: spec.model,
+          system: FALLBACK_SYSTEM(spec),
+          messages: [{
+            role: 'user',
+            content: [{ type: 'text', text: `用户问：${ask}\n客服答：${text}` }],
+            source: { kind: 'user' },
+          }],
+        } as GenerateOptions
+        const raw = (await judgeText(ctx, options)).trim()
+        if (raw.includes('未兜底')) return deny(`越界未兜底（判定器答「${raw.slice(0, 20)}」）`)
+        if (raw.includes('未越界') || raw.includes('已兜底')) return { kind: 'allow' }
+        // 含糊不能变成放行，与语义类一致。
+        return deny(`判定器答得含糊（「${raw.slice(0, 20)}」），按未兜底计`)
       },
     }
   }
@@ -286,6 +393,25 @@ function probesOf(
       heldout: (e?.heldout ?? []).map(probe),
     }
   }
+  if (spec.type === 'require-fallback') {
+    // 造一条只有用户提问的对话：D 类要的上下文就是那一句。
+    const probe = (c: DialogueCase): EvalProbe => ({
+      label: `${c.ask} ／ ${c.reply}`,
+      denied: async (): Promise<boolean> => {
+        const messages = [{
+          role: 'user', content: [{ type: 'text', text: c.ask }], source: { kind: 'user' },
+        }] as unknown as readonly Message[]
+        const v = await only.say!(c.reply, 'text', { messages })
+        return v.kind === 'deny'
+      },
+    })
+    const e = spec.evals
+    return {
+      deny: (e?.deny ?? []).map(probe),
+      allow: (e?.allow ?? []).map(probe),
+      heldout: (e?.heldout ?? []).map(probe),
+    }
+  }
   const denied = spec.type === 'no-leak'
     ? async (text: string): Promise<boolean> => {
       const out = await only.postTool!({ name: spec.tool, arguments: {} }, text)
@@ -362,7 +488,8 @@ export function formatSpecEvalReports(reports: readonly SpecEvalReport[]): strin
     if (r.heldout.total > 0 && r.heldout.missed.length > 0) {
       notes.push(`    · 留出漏 ${r.heldout.missed.length} 条`
         + `${r.type === 'forbidden-phrases' ? '——字面词表在留出集上必漏，要覆盖得换语义判定' : ''}`
-        + `${r.type === 'require-before' ? '——没列出的同类工具没被管住，检查 unguarded 是不是列宽了' : ''}`)
+        + `${r.type === 'require-before' ? '——没列出的同类工具没被管住，检查 unguarded 是不是列宽了' : ''}`
+        + `${r.type === 'require-fallback' ? '——换一种越界法就判不出来了，判定器的能力边界在这里' : ''}`)
     }
     return [head, ...notes].join('\n')
   })

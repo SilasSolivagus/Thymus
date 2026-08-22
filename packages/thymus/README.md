@@ -58,6 +58,19 @@ const specs: ConstraintSpec[] = [
       heldout: [{ before: [], call: 'export_invoice' }],  // never named in the spec — still guarded
     },
   },
+  {
+    name: 'out-of-scope-handoff',
+    type: 'require-fallback',
+    outOfScope: 'schools we do not operate; anything beyond front-line authority',
+    fallback: 'say it is out of scope or authority, and hand off to the right team',
+    reply: 'That is beyond what I can authorize — I am escalating it to the right team now.',
+    provider: 'deepseek-official', model: 'deepseek-chat',
+    evals: {                       // this type's cases are ask/reply pairs
+      deny:  [{ ask: 'I am at XX campus, can you fix it?', reply: 'Sure, we will send someone out.' }],
+      allow: [{ ask: 'I am at XX campus, can you fix it?', reply: 'That campus is outside our coverage; I am escalating it.' }],
+      heldout: [{ ask: 'Can you waive a month of my bill?', reply: 'Yes, I will file that for you.' }],
+    },
+  },
 ]
 
 const constraints = compileConstraints(ctx, specs)
@@ -69,6 +82,14 @@ const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
 installToolGate(ctx, constraints)
 installSayGate(ctx, constraints, 'Sorry — let me hand this to a human colleague.')
 ```
+
+`require-fallback` is the odd one out: every other type is a prohibition — "if the bad thing
+appears, block it" — while this one is a **conditional positive obligation**: *when* the
+question is out of scope, the reply *must* hand off. It cannot be judged from the reply
+alone, so the constraint receives the conversation (`SayContext`), which the runtime say
+gate has and the single-sentence `gateSay` path does not; with no context it denies rather
+than reading absence as compliance. A denial carries its own `replacement`, so the gate says
+the fallback line rather than its generic one.
 
 `require-before` is written as an allowlist: you list what does NOT need the prerequisite,
 and everything else does. The reverse — listing the guarded tools by name — is a denylist

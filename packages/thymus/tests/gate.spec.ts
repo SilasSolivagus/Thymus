@@ -1227,3 +1227,66 @@ describe('判决聚合层 · 调用方身份', () => {
     expect((res as { error?: { message?: string } }).error?.message).toContain('没有身份')
   })
 })
+
+// ── 说话侧网关拿不拿得到会话上下文 ──
+// D 类（越界必须转出）光看 agent 那一句判不了：越不越界取决于用户问了什么。
+// 先验网关这一层看不看得见对话，再谈那一类怎么写。
+
+describe('说话通道网关 · 会话上下文与自带替代话术', () => {
+  it('论证90 网关把这次请求的完整对话交给约束——用户那句在里面', async () => {
+    let seen: readonly { role?: string; source?: { kind?: string }; content?: { type?: string; text?: string }[] }[] = []
+    const recording: Constraint = {
+      name: 'recording',
+      say: (_t, _channel, context) => {
+        if (context !== undefined) seen = context.messages as never
+        return { kind: 'allow' }
+      },
+    }
+    await runSayAgent(sayChunks('已为您核实。'), ctx => {
+      installSayGate(ctx, [recording], SAY_REPLACEMENT)
+    })
+    const asks = seen
+      .filter(m => m.role === 'user' && m.source?.kind === 'user')
+      .flatMap(m => (m.content ?? []).filter(c => c.type === 'text').map(c => c.text))
+    expect(asks).toContain('我这个月账单多少？')
+  })
+
+  it('论证91 判决自带替代话术时优先用它，没带才用网关那句', async () => {
+    const own: Constraint = {
+      name: 'own-line',
+      say: t => t.includes(SAY_BANNED)
+        ? { kind: 'deny', reason: '命中禁语', replacement: '这个问题超出我的权限，我反馈给相关部门。' }
+        : { kind: 'allow' },
+    }
+    const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      installSayGate(ctx, [own], SAY_REPLACEMENT)
+    })
+    expect(r.said).toBe('这个问题超出我的权限，我反馈给相关部门。')
+    expect(r.said).not.toBe(SAY_REPLACEMENT)
+  })
+
+  it('论证92 replacement 不是字符串按非法判决处理——非法不能变成放行', async () => {
+    const bogus = {
+      name: 'bogus',
+      say: () => ({ kind: 'deny', reason: 'x', replacement: 42 }),
+    } as unknown as Constraint
+    const ctx = await boot()
+    const r = await gateSay(ctx, '您好', [bogus])
+    expect(r.verdict.kind).toBe('deny')
+    expect(r.verdict.kind === 'deny' && r.verdict.reason).toContain('非法判决')
+  })
+
+  it('论证93 gateSay 那条路径不给上下文——要上下文的约束得能分清「没有」和「空」', async () => {
+    let got: 'missing' | 'present' = 'present'
+    const needsContext: Constraint = {
+      name: 'needs-context',
+      say: (_t, _c, context) => {
+        got = context === undefined ? 'missing' : 'present'
+        return { kind: 'allow' }
+      },
+    }
+    const ctx = await boot()
+    await gateSay(ctx, '您好', [needsContext])
+    expect(got).toBe('missing')
+  })
+})

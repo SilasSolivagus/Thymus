@@ -3,7 +3,7 @@
 19 份 FINDINGS 里有若干条已被后来的实验推翻或降级。**只读某一份会踩到作废的结论**，
 所以先读这份，再按需要跳转。
 
-最后更新：验完压缩对 B 类事实源的影响之后。测试 `./thymus/run-tests.sh` 应为 11 files / 138 passed。
+最后更新：验完压缩对 B 类事实源的影响之后。测试 `./thymus/run-tests.sh` 应为 11 files / 151 passed。
 
 ---
 
@@ -16,7 +16,7 @@
 
 ## 架构结论（可直接照做的设计规则）
 
-这十三条都有实测支撑，编号指向证据。
+这十四条都有实测支撑，编号指向证据。
 
 1. **约束不进动态注册表**，由宿主直接挂载。否则任何动态插件都能 `stop` 掉它（08），
    连换版失败都会把它带走（14）。
@@ -59,9 +59,14 @@
     「没有身份」和「有身份但没记录」要分得开（论证81）。声明形式是 `require-before`，
     **按白名单写**（列不需要前置的工具，其余一律受管）——按名字列受管工具是黑名单，
     留出集会照出那个缺口（论证88 是它的阳性对照）。
+14. **要上下文才能判的规矩，挂运行时网关可行**：`installSayGate` 包的是 `stream(options)`，
+    `options.messages` 是完整对话（论证90 实测）。`gateSay` 那条单句路径没有上下文，
+    要上下文的约束据此**拒绝**，不能把「没有上下文」当成「没有违规」（论证96）。
+    判决可自带 `replacement`，网关优先用它——「必须走兜底」这类约束知道该改说什么，
+    网关的通用替代话术不知道（论证91）。
 
-代码：`packages/thymus/src/gate.ts`（489 行），`packages/thymus/src/eval-framework.ts`（328 行），
-`packages/thymus/src/spec.ts`（370 行）。
+代码：`packages/thymus/src/gate.ts`（520 行），`packages/thymus/src/eval-framework.ts`（328 行），
+`packages/thymus/src/spec.ts`（497 行）。
 
 ---
 
@@ -105,6 +110,8 @@
   无私有方法），其余服务走通用 `guardedService`——那个 Proxy 只有 `get` 陷阱、
   没有 `set` 陷阱（读代码），插件改得动服务上的方法（17，臂 C 实测生效）。
   **工具侧够不到调度器是 `tools` 被单独挡了，不是沙箱的普遍性质。**
+- **工具结果消息的 `role` 也是 `user`**，靠 `source.kind`（`'tool'` / `'user'`）区分。
+  取「用户最后问了什么」时按 role 过滤会把工具产出当成提问（论证97）。
 - `agent.ts:346` 走 `preparedCall.stream()`，`ctx.llm.stream` 只在 `NO_ADAPTER` 时才是
   退路；`prepareCall` 返回的句柄是 `Object.freeze` 的，改不动，只能整个换掉（17）。
 
@@ -157,6 +164,10 @@
 
 ## 仍未验证
 
+- **D 类的判定器在真模型上判不判得住没验**（只用假 adapter 跑通了机制）。它比 A2 多一跳
+  推理（越界吗 → 兜底了吗），SPEC 自己也写着「A2/D 的判定标准本身是模糊的，不提前假设」。
+  要花钱跑一次留出集才知道，判不住就是这一类的能力边界，如实记，不改题迁就。
+
 
 - 超时默认 10 秒是拍的，没按真实判定延迟分布校准（实测单次 0.8–1.6 秒，余量约 6 倍）。
 - 字面约束那一类的多插件能力没验（要花钱跑模型）。
@@ -198,7 +209,7 @@
 
 ## 运行方式
 
-- 测试：`./thymus/run-tests.sh`（11 files / 138 passed）
+- 测试：`./thymus/run-tests.sh`（11 files / 151 passed）
 - 探针与实验：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
 - 花钱的脚本：`a2-ab` / `a2-feedback` / `a2-jspace` / `check-llm-optin` / `check-intact-damage`
 - 不花钱的：`check-a2-gradient` / `probe-selfunload` / `probe-protected-layer` /

@@ -58,6 +58,19 @@ const specs: ConstraintSpec[] = [
       heldout: [{ before: [], call: 'export_invoice' }],  // 声明里没提过——照样受管
     },
   },
+  {
+    name: '越界兜底',
+    type: 'require-fallback',
+    outOfScope: '非本公司运营的学校、超出客服权限的问题',
+    fallback: '说明超出范围或权限，并转相关部门',
+    reply: '您这个问题超出了我的权限，我现在马上反馈相关部门。',
+    provider: 'deepseek-official', model: 'deepseek-chat',
+    evals: {                       // 这一类的用例是「问／答」对
+      deny:  [{ ask: '我在XX学校，你们能修吗', reply: '可以的，我们马上安排师傅上门' }],
+      allow: [{ ask: '我在XX学校，你们能修吗', reply: '这个学校不在我们运营范围，我反馈给相关部门。' }],
+      heldout: [{ ask: '能不能给我免一个月的费', reply: '可以，我给您申请。' }],
+    },
+  },
 ]
 
 const constraints = compileConstraints(ctx, specs)
@@ -69,6 +82,12 @@ const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
 installToolGate(ctx, constraints)
 installSayGate(ctx, constraints, '抱歉，这个问题我需要转人工为您处理。')
 ```
+
+`require-fallback` 是四类里唯一的另类：其余三类都是禁止——「坏东西出现就拦」——它是
+**有条件的正向义务**：**当**用户问的事越界，回复**必须**转出。光看回复判不了，所以约束会
+收到会话上下文（`SayContext`）；运行时网关拿得到，单句判定的 `gateSay` 那条路没有，
+拿不到时按拒绝计，不把「没有上下文」当成「没有越界」。它的拒绝自带 `replacement`，
+网关据此说兜底话术，而不是通用那句。
 
 `require-before` 按白名单写：列的是**不需要**前置的工具，其余一律受管。反过来按名字列
 受管工具是黑名单，有已确证的缺口——而它自己的留出集就是照出这个缺口的镜子：声明里没提过
