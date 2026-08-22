@@ -34,6 +34,9 @@
 | 14 | 热替换干净；但决策途中换版会让该次调用失败（方向是不放行），且 run 阶段换版失败会把旧约束带走 | `FINDINGS-14-hotswap.md` |
 | 15 | 模型调用失败不抛错而是发 error finish——插件词表兜底不执行、网关 fail-closed 被绕过 | `FINDINGS-15-silent-llm-failure.md` |
 | 16 | 网关挂错了地方：agent 不走 `execute` 走调度器；改写产出与拒绝在真实链路上各验 3/3 | `FINDINGS-16-real-mount-point.md` |
+| 17 | 说话侧挂载点是 `ctx.llm.prepareCall`（`ctx.llm.stream` 命中 0 次）；它站在 `llm/stream` 链外，但沙箱插件够得到同一个入口，后包的赢；reasoning 是漏点，重试每次都重新过网关 | `FINDINGS-17-say-mount-point.md` |
+| 18 | B 类的状态从会话事件现读即可，不用自己存；工具侧有身份、说话侧身份在 `stream` 那一层；多 agent 不串；并发派发时事实还没落库 | `FINDINGS-18-b-class-state.md` |
+| 19 | 压缩与剪枝只动 surface，事件日志只增不减；resume 之后 B 类的事实仍在 | `FINDINGS-19-facts-survive-compaction.md` |
 
 **分层结论：写规矩，模型能；判自己写得对不对，现在不能；语义那部分，机制上够到边了，
 模型也会走，但它第一版有相当比例会把旧机制留在前门、收益自己抵消
@@ -128,23 +131,56 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   断言看的是**模型在下一轮请求里实际收到的 tool-result**，不是我们自己的返回值
   （论证59–63，不花钱）。四条对照：老写法在真 agent 上 execute 命中 0 次、
   无网关时内部字段确实漏、缺 `error` 时拒绝理由被换成序列化错误发给模型、
-  抹除只动该动的字段。测试 11 files / 112 passed。
+  抹除只动该动的字段。测试 11 files / 126 passed。
 
-**下一步（说话侧，要先探再写）**：HANDOFF 原先写「说话侧改成挂 `llm/stream` waterfall」，
-但那正是 STATUS 架构结论第 2 条禁止的同侪形态——论证12 实测四种挂载顺序里输两种。
-工具侧能站到链外，是因为调度器是链外的入口；说话侧的对应物是什么还没探。
-第一个候选是包住 `ctx.llm.stream` 这个服务方法本身（与包 `execute` 同形），
-用脚本化 adapter 就能测，不花钱。探明之前不要写 `installSayGate`。
+- **说话侧挂载点——已探，见发现 17**（`probe-say-mount.ts`，脚本化 adapter，不花钱）。
+  `ctx.llm.stream` 命中 0 次，是第二个 `execute`；agent 走 `preparedCall.stream()`。
+  可用的位置是包住 `ctx.llm.prepareCall`：它站在 `llm/stream` 整条链之外，拿得到
+  用户会看到的那段文本，改写后 `assistant/message` 与 `assistant/chunk` 都干净。
+  但沙箱插件够得到同一个入口，后包的赢（臂 C 禁语原样送达）——所以它不是保护层，
+  靠架构结论 7 兜底。附带查清：工具侧够不到调度器，是因为 `tools` 有手写 façade，
+  不是沙箱的普遍性质。
 
-改完之后的验收，三条都要（工具侧的教训）：
+- **说话侧网关——已做**。`installSayGate(ctx, constraints, replacement, timeoutMs?)`
+  包住 `ctx.llm.prepareCall`：整条流收完 → 装配 → 正文与思考块**分两条通道各判一次**
+  → 按 chunk 协议重发。`Constraint.say` 因此加了第二个参数 `channel`。
+  拒绝的语义已拍板：**只换话，不停轮**——正文换成调用方给的那句，思考块整块丢掉，
+  同一条消息里的工具调用照常执行。`gateSay` 保留为「判一句话」的评测入口。
+  验收八条走真 agent 路径（论证69–77，脚本化 adapter，不花钱）：挂 `ctx.llm.stream`
+  命中 0 次的对照、无网关时禁语落库的阳性对照、`assistant/chunk` 里也没有禁语
+  （证明没先放行再改）、reasoning 分开判且不与正文拼接、只判正文会漏的对照、
+  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 11 files / 126 passed。
 
-1. **端到端、真 agent、n≥3。** 单测全绿不算数——工具侧 107 个测试全过，
-   真 agent 上网关一次都没触发。
-2. **必须有阳性对照。** 没有对照的「0 次泄露」可能只是题太软。
-   参考 `probe-verbatim-leak.ts`：先证明无防护时真的会漏，再看加了之后归零。
-3. **必须做抢位测试。** 让一个动态插件在 `llm/stream` 上 `prepend` 一个把禁语塞回去的
-   handler，确认网关仍拦得住。这是说话侧与工具侧最不一样的地方，也是选错挂载点时
-   唯一会暴露的地方。
+- **B 类的状态——已探，见发现 18**（`probe-b-state.ts`）。三条结论：
+  状态**不用自己存**，从 `agent.session.events` 现读就够（`tool/call` 的名字与
+  `tool/result` 的成败按 callId 对上）；工具侧 `exec.agent` 有身份，说话侧身份在
+  `stream(options).sessionId` 而不在 `prepareCall` 的 config 上；多 agent 并发不串
+  （实测调用顺序真交错，判决各归各的）。两个坑：工具声明 `isConcurrencySafe` 后
+  并发派发，账单的 `prepare` 跑在核验 `finalize` 之前，事实还没落库会拒掉合法的
+  批量调用（方向是 fail-closed）；压缩之后事实还在不在没测。
+
+- **压缩会不会弄没事实——已验，见发现 19**。不会：压缩只动 surface，剪枝是追加一条盖上去，
+  原始 `tool/call` / `tool/result` 都留在日志里，换宿主 resume 之后判定不变。
+  但方向要记牢：**从事件日志读，不要从 surface 读**——改成读 surface，剪枝就开始影响判定。
+  顺带一个操作性现象：`dispose()` 之后立刻 resume 会报 `session not found`，等 300ms 才行。
+
+**下一步（B 类，实现）**：先改接口——`Constraint.preTool` 的入参要带调用方身份
+（sessionId 或整个 agent），否则约束够不到会话，B 类落不了地。这是个会动到已发布类型的
+改动，A/C 两类不需要它，所以要想清楚是加可选字段还是换一个上下文参数。
+之后 B 类约束写成纯函数：输入会话日志，输出判决。
+
+说话侧剩下两个没量的：缓冲全流对首字延迟的代价、多 agent 并发下这一层过不过得干净。
+
+验收三条（工具侧的教训），说话侧已按这三条做完：
+
+1. **端到端、真 agent。** 单测全绿不算数——工具侧 107 个测试全过，真 agent 上网关
+   一次都没触发。论证69–77 全部走 `agent-loop`，断言看会话里落下的
+   `assistant/message` 与 `assistant/chunk`。脚本化 adapter 是确定性的，不需要 n≥3
+   （那条规矩是给真模型的）。
+2. **必须有阳性对照。** 论证69（无网关时禁语落库）、论证74（只判正文时思考块漏）、
+   论证76 上半（无网关时抢位攻击确实得手）。
+3. **必须做抢位测试。** 论证76：网关先装、动态插件后在 `llm/stream` 上 `prepend`
+   把禁语塞回去，网关仍拦得住。
 
 别踩的坑（都已实测）：
 - 判定用的模型调用**必须走 `judgeText`**。直接 `for await ctx.llm.stream` 时失败不抛错，
@@ -152,10 +188,11 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 - 拒绝结果**必须带 `error` 字段**，否则被判为有损序列化并抛错（发现 16）。
 - 真模型跑之前确认 `demo/run.sh` 里的 `--use-env-proxy` 还在。这台机器要走代理，
   不加时所有调用失败，**而失败的样子和「模型很守规矩」一模一样**。
-- 先看 `packages/core/agent-loop/src/agent.ts` 怎么发起模型调用——agent-loop 可能
-  不直接调 `ctx.llm.stream`，就像它不调 `ctx.tools.execute` 一样。
+- `ctx.llm.stream` **不是挂载点**，已实测命中 0 次：`agent.ts:346` 走
+  `preparedCall.stream()`（发现 17）。这个坑在这个仓里出现两次了，下次接别的通道时
+  先去看 agent-loop 到底调的哪个方法。
 
-之后：B 类（认人前置）——它要跨调用记状态，得先探状态挂在哪、多 agent 会不会串。
+
 
 ## 下一步
 
@@ -197,7 +234,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 ## 运行方式
 
 - 探针/demo：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
-- 测试：`./thymus/run-tests.sh`（应为 11 files / 112 passed）
+- 测试：`./thymus/run-tests.sh`（应为 11 files / 126 passed）
 - `spec-plugins.ts` 顶层已改为「仅直接执行时运行」。**其他 campus 脚本不要 import 它**
   之外的实验脚本前先确认同样有这个判断——曾因顶层无条件 `main()` 被 import 触发重跑，
   覆盖过冻结的 `evals.json`（从 `../trajectories/_no-cwd/campus-author/session.jsonl`

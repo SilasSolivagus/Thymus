@@ -1,9 +1,9 @@
 # Thymus 现状（先读这份）
 
-16 份 FINDINGS 里有若干条已被后来的实验推翻或降级。**只读某一份会踩到作废的结论**，
+19 份 FINDINGS 里有若干条已被后来的实验推翻或降级。**只读某一份会踩到作废的结论**，
 所以先读这份，再按需要跳转。
 
-最后更新：工具通道网关搬到调度器之后。测试 `./thymus/run-tests.sh` 应为 11 files / 112 passed。
+最后更新：验完压缩对 B 类事实源的影响之后。测试 `./thymus/run-tests.sh` 应为 11 files / 126 passed。
 
 ---
 
@@ -16,7 +16,7 @@
 
 ## 架构结论（可直接照做的设计规则）
 
-这九条都有实测支撑，编号指向证据。
+这十三条都有实测支撑，编号指向证据。
 
 1. **约束不进动态注册表**，由宿主直接挂载。否则任何动态插件都能 `stop` 掉它（08），
    连换版失败都会把它带走（14）。
@@ -30,7 +30,8 @@
 6. **判定用的模型调用必须走 `judgeText`**，不要直接 `for await ctx.llm.stream`。
    失败时它不抛错，发 error finish 后正常结束，try/catch 不触发（15）。
 7. **写约束的 agent 和被约束的业务 agent 必须分开**，业务 agent 不给 cordis 动态插件工具。
-   一旦有，它能自挂前插的 allow，或提交一个装载即抛错的新版把约束带走（09、14）。
+   一旦有，它能自挂前插的 allow，或提交一个装载即抛错的新版把约束带走（09、14），
+   在说话侧还能把网关整个包在里面架空（17）。说话侧没有别的兜底，这条是承重的。
 8. **工具通道的网关挂调度器**（`ctx.tools[TOOL_RUNTIME_SCHEDULER]` 的 `prepare` 拒绝、
    `finalize` 改写产出），不是 `ctx.tools.execute`——agent-loop 不走 execute，真 agent
    跑一轮 execute 命中 0 次（16）。`execute` 仍要包，它服务外部调用方（含评测框架）；
@@ -38,8 +39,24 @@
 9. **拒绝结果必须带 `error` 字段**。调度器把 `{ isError, error, …presentation }` 整体过
    `snapshotJsonValue`，缺一个属性就判为有损；模型收到的不是我们写的拒绝理由，而是
    「tool result must be losslessly JSON-serializable」（16，论证61 是它的机械对照）。
+10. **说话通道的网关挂 `ctx.llm.prepareCall`**：包住它、缓冲全流、装配后裁决、按 chunk
+    协议重发。`ctx.llm.stream` 命中 0 次（agent 走 `preparedCall.stream`），`llm/stream`
+    是同侪抢位。必须缓冲全流再决定——`agent.ts:348` 每个 chunk 直接落 `assistant/chunk`，
+    先放行再改就晚了（17）。**这一条不满足第 2 条**：沙箱插件够得到同一个入口，
+    后包的赢，所以它靠第 7 条兜底（17 臂 C）。
+11. **reasoning 块要单独判，不能和正文拼成一段**。只判正文时禁语从思考块原样漏出；
+    拼起来判则判定器拿到的是两段不同性质的文本粘在一起（17 第五节）。
+    `Constraint.say` 因此带第二个参数 `channel`（`'text' | 'reasoning'`），两条各判一次。
+12. **说话侧拒绝的语义是「只换话，不停轮」**（已定）：正文换成调用方给的替代话术，
+    思考块整块丢掉，同一条消息里的工具调用照常执行、这一轮照常走完。
+    要连带停轮是上层的事，网关这一层不做（论证75）。
+13. **B 类（跨调用状态）做成无状态判定**：事实从 `agent.session.events` 现读，
+    不自己存一份，也就没有「自己那份和会话不一致」的漂移。代价是并发派发时
+    前一个调用的结果还没落库，合法的批量调用会被拒——方向是 fail-closed（18）。
+    **从事件日志读，不要从 surface 读**：压缩与剪枝都只动 surface、日志只增不减，
+    换宿主 resume 之后事实照样在（19）。
 
-代码：`packages/thymus/src/gate.ts`（287 行），`packages/thymus/src/eval-framework.ts`（328 行），
+代码：`packages/thymus/src/gate.ts`（391 行），`packages/thymus/src/eval-framework.ts`（328 行），
 `packages/thymus/src/spec.ts`（242 行）。
 
 ---
@@ -69,6 +86,23 @@
   agent-loop 只走后者；后者标了 `@internal`，dsh 没承诺它跨版本稳定（16）。
 - 成功结果一律经 `finalize`；走 `finish` 的是出错结果与 `prepare` 给出的 final-result，
   两者都没有可脱敏的产出。`dispatch` 与 `finish` 的行为仍未测（16）。
+- `ToolExecutionInput.agent` 在调度器路径上是填好的：`agent.id` 就是 sessionId，
+  顺着 `agent.session.events` 拿得到整条会话日志。说话侧 `prepareCall` 的 config
+  只有 `provider,model`，**没有身份**；sessionId 在 `stream(options)` 上（18）。
+- 会话日志里名字只在 `tool/call`、成败只在 `tool/result` 的结果块上，按 callId 对上
+  才知道哪个工具成功了。工具默认 exclusive（跑完一个再下一个），声明
+  `isConcurrencySafe` 才并发派发——那时前一个调用的 `tool/result` 还没落库（18）。
+- 压缩三个 `compaction/*` 事件是 log-only，摘要靠一条带 `surfaceOp: replace` 的
+  `user/message` 顶上；工具结果剪枝是**追加**一条盖在 surface 上，原始那条留在日志里。
+  实测压缩、剪枝、换宿主 resume 三关之后 `tool/call` / `tool/result` 一条不少（19）。
+- `handle.dispose()` 之后立刻在新宿主 resume 会报 `session not found`，等 300ms 再试成功。
+  只是现象，没读实现（19）。
+- 沙箱对服务的待遇不一致：`tools` 是手写 façade（只有 register/schemas/get，无符号键、
+  无私有方法），其余服务走通用 `guardedService`——那个 Proxy 只有 `get` 陷阱、
+  没有 `set` 陷阱（读代码），插件改得动服务上的方法（17，臂 C 实测生效）。
+  **工具侧够不到调度器是 `tools` 被单独挡了，不是沙箱的普遍性质。**
+- `agent.ts:346` 走 `preparedCall.stream()`，`ctx.llm.stream` 只在 `NO_ADAPTER` 时才是
+  退路；`prepareCall` 返回的句柄是 `Object.freeze` 的，改不动，只能整个换掉（17）。
 
 ### 评测框架
 
@@ -108,10 +142,15 @@
 4. **dsh 用返回值表达失败，不是异常。** 接它流式接口的地方都要显式检查结束原因。
    这一类错误已经踩了三次：`say()` 吞传输失败、反馈空转、判定静默失败。
 5. **读代码得出的结论要标明来源**，不要和实测并排放。本轮有两次读代码推理是错的。
+6. **读会话事件的形状不要凭印象写，先 dump 一条真的出来。** 发现 18 里判定和验收
+   读错了同一处，两个错互相掩盖，屏幕上是「三种剧本都一切照常」——一个非常像样的
+   错误结论。
 
 ---
 
 ## 仍未验证
+
+- `Constraint.preTool` 的入参还没加调用方身份，B 类因此还落不了地（18）。
 
 - 超时默认 10 秒是拍的，没按真实判定延迟分布校准（实测单次 0.8–1.6 秒，余量约 6 倍）。
 - 字面约束那一类的多插件能力没验（要花钱跑模型）。
@@ -119,10 +158,10 @@
 - 判定结果落盘做题库——是建设不是验证，没做。
 - 抽检校准那一环这个 spike 里验不了（需真人真流量）。
 - 网关仍在同进程，是应用层逻辑不是边界。CC 靠操作系统文件权限做最高层，我们没有对应物。
-- 说话通道的挂载点还没定。已验的只有「agent 正文确实过 `llm/stream`」（16）；
-  `gateSay` 仍是我们自己起一条假上游跑装配，不是插在 agent loop 的那条流上。
-  直接挂 `llm/stream` 会踩上面第 2 条（同侪抢位，论证12 里四种顺序输两种），
-  工具侧那种「站在链外」的对应物在说话侧是什么，要先探。
+- 说话通道网关已按发现 17 落地（`installSayGate`），但**缓冲全流对首字延迟的代价没量**；
+  多 agent 并发下过不过得干净也没测。`gateSay` 保留为「判一句话」的评测入口。
+- 说话侧网关被业务 agent 包在外面这件事，我们察觉不到（17 臂 C）。篡改检测没做。
+- 把 `llm` 也做成 façade 这条加固路没试，也没向上游确认这个不对称是有意还是缺口。
 - `run` 阶段换版失败不回滚，是 dsh 有意还是缺口——只记了现象，没读那段设计意图，
   也没向上游确认。
 
@@ -146,11 +185,16 @@
 - 发现 11–12：J-Space 评估、基线双峰与三条结论的撤回
 - 发现 13–15：多插件污染、热替换、静默失败
 - 发现 16：网关挂错了地方——agent 走调度器不走 `execute`（已按它改，见架构结论 8、9）
+- 发现 17：说话侧挂载点——`prepareCall` 够得到，但沙箱也够得到（架构结论 10，已实现）
+- 发现 18：B 类的状态——从会话事件现读，接口要加身份，并发派发时事实还没落库
+- 发现 19：压缩与剪枝只动 surface，事件日志只增不减；resume 之后事实仍在
 - 配图：`constraint-holder-antipattern.svg` / `.png`
 
 ## 运行方式
 
-- 测试：`./thymus/run-tests.sh`（11 files / 112 passed）
+- 测试：`./thymus/run-tests.sh`（11 files / 126 passed）
 - 探针与实验：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
 - 花钱的脚本：`a2-ab` / `a2-feedback` / `a2-jspace` / `check-llm-optin` / `check-intact-damage`
-- 不花钱的：`check-a2-gradient` / `probe-selfunload` / `probe-protected-layer`
+- 不花钱的：`check-a2-gradient` / `probe-selfunload` / `probe-protected-layer` /
+  `probe-say-mount` / `probe-b-state`（带 `DUMP=1` 可打印会话事件真实形状）/
+  `probe-compaction-facts`
