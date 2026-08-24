@@ -15,12 +15,25 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { installSayGate, installToolGate } from '../src/gate.ts'
+import { installSayGate, installToolGate, type Constraint } from '../src/gate.ts'
 import { compileConstraints } from '../src/spec.ts'
 import { DECLARATIONS } from '../campus/spec-declarations.ts'
 
 export const name = 'thymus'
 export const inject = ['llm', 'tools']
+
+/** 本轮网关做过什么。给观察界面用的旁路记录，不参与裁决。 */
+export interface ThymusEvent {
+  kind: '说话被拦' | '工具被拦' | '产出被改写'
+  who: string
+  detail: string
+}
+
+/** 挂在 ctx 上的旁路记录本：界面插件按轮取走。 */
+export interface ThymusTrace {
+  events: ThymusEvent[]
+  reset(): void
+}
 
 /** 网关兜底串。终点串，必须在所有语境下干净——冻结闸盯着这一条（发现 31 四）。 */
 const GATEWAY_REPLY = '抱歉，这个问题超出我这边能处理的范围，我帮您转相关部门跟进。'
@@ -50,10 +63,47 @@ function campusTools(): ToolDefinition[] {
   ]
 }
 
+/** 约束外面包一层，把发生的事记进旁路本子。不改约束本身，也不影响判决。 */
+function instrument(constraints: readonly Constraint[], trace: ThymusTrace): Constraint[] {
+  return constraints.map(c => ({
+    ...c,
+    ...c.say === undefined ? {} : {
+      say: async (text: string, channel: 'text' | 'reasoning', context?: never) => {
+        const v = await c.say!(text, channel, context)
+        if (channel === 'text' && v.kind === 'deny') {
+          trace.events.push({ kind: '说话被拦', who: c.name, detail: `原话「${text.slice(0, 60)}」／${v.reason}` })
+        }
+        return v
+      },
+    },
+    ...c.preTool === undefined ? {} : {
+      preTool: async (call: Parameters<NonNullable<Constraint['preTool']>>[0]) => {
+        const v = await c.preTool!(call)
+        if (v.kind === 'deny') trace.events.push({ kind: '工具被拦', who: c.name, detail: `${call.name}／${v.reason}` })
+        return v
+      },
+    },
+    ...c.postTool === undefined ? {} : {
+      postTool: async (call: Parameters<NonNullable<Constraint['postTool']>>[0], text: string) => {
+        const out = await c.postTool!(call, text)
+        if (typeof out === 'string' && out !== text) {
+          trace.events.push({ kind: '产出被改写', who: c.name, detail: `${call.name}：「${text.slice(0, 50)}」→「${out.slice(0, 50)}」` })
+        }
+        return out
+      },
+    },
+  }))
+}
+
 export function apply(ctx: Context): void {
   for (const tool of campusTools()) ctx.tools.register(tool)
-  const constraints = compileConstraints(ctx, DECLARATIONS)
-  installToolGate(ctx, constraints)
-  installSayGate(ctx, constraints, GATEWAY_REPLY)
-  console.log(`[thymus] 已挂载 ${constraints.length} 条约束：${DECLARATIONS.map(s => s.name).join('、')}`)
+  const trace: ThymusTrace = { events: [], reset(): void { this.events = [] } }
+  const guarded = instrument(compileConstraints(ctx, DECLARATIONS), trace)
+  installToolGate(ctx, guarded)
+  installSayGate(ctx, guarded, GATEWAY_REPLY)
+  // 旁路本子挂到 ctx 上：观察界面是另一个插件，只有这样拿得到。治理本身不读它。
+  const provide = ctx as unknown as { provide(name: string, value?: unknown): void; thymusTrace?: ThymusTrace }
+  provide.provide('thymusTrace')
+  provide.thymusTrace = trace
+  console.log(`[thymus] 已挂载 ${guarded.length} 条约束：${DECLARATIONS.map(s => s.name).join('、')}`)
 }
