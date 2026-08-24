@@ -379,7 +379,8 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   不管声称已完成的动作，即这条规矩没写进 SPEC。
   **补法已实现**：`checkReplacements` 把每条替代话术拿所有约束在各自的触发条件下判一遍，
   接在 `check-spec-full.ts` 那一轮里。真 SPEC 实跑 `repeats=3` 抓出 2/3 条
-  （判一次会漏，方差是真的）。剩下没做的是那条没写进 SPEC 的规矩：不得声称未发生的动作。
+  （判一次会漏，方差是真的）。「不得声称未发生的动作」已登记进 `uncovered`，还没变成规矩——
+  它不是表达不了，是 SOP 原文没有、措辞要客户定；在那之前这一类全绿。
 - ~~fail-open / fail-closed 路径零失败~~ **已打，见发现 15**：两侧兜底都是假的。
   `ctx.llm.stream` 失败时不抛错，发 error finish 后正常结束，try/catch 不触发。
   已加 `judgeText()` 把静默失败翻成异常；判定调用一律走它。
