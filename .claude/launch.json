@@ -4,8 +4,18 @@
     {
       "name": "thymus-web",
       "runtimeExecutable": "bash",
-      "runtimeArgs": ["thymus/dsh/web.sh"],
+      "runtimeArgs": [
+        "thymus/dsh/web.sh"
+      ],
       "port": 3082
+    },
+    {
+      "name": "thymus-shell",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "thymus/dsh/shell.sh"
+      ],
+      "port": 3083
     }
   ]
 }
