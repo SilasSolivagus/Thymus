@@ -156,6 +156,59 @@ describe('冻结前机械闸', () => {
     expect(r.problems.some(p => p.message.includes('死用例'))).toBe(true)
   })
 
+  it('论证114 语义类：留出题与某条必拦题逐字相同——不算留出', () => {
+    // 这一类的必拦题不一定含 policy 里引号举过的例词，所以「举过的例词」那道检查
+    // 抓不到逐字重复这种形状。
+    const spec: ConstraintSpec = {
+      name: '服务禁语', type: 'semantic-policy',
+      policy: '回复不得消极、不得推诿。',
+      provider: 'p', model: 'm',
+      evals: {
+        deny: ['这事我管不了。'], allow: ['已为您核实。'],
+        heldout: ['这事我管不了。'],            // ← 与必拦题逐字相同
+      },
+    }
+    const r = checkSpecHygiene(bundle([spec]))
+    expect(r.ok).toBe(false)
+    expect(r.problems.some(p => p.message.includes('不算留出'))).toBe(true)
+  })
+
+  it('论证115 认人前置：留出序列与某条必拦序列相同——不算留出', () => {
+    const dup: ConstraintSpec = {
+      ...GOOD_SEQ,
+      evals: { ...GOOD_SEQ.evals, heldout: [{ before: [], call: 'query_bill' }] },
+    } as ConstraintSpec
+    const r = checkSpecHygiene(bundle([dup]))
+    expect(r.ok).toBe(false)
+    expect(r.problems.some(p => p.message.includes('不算留出'))).toBe(true)
+  })
+
+  it('论证116 同一条同时写进必拦和必放：这两组自相矛盾，拦住冻结', () => {
+    const contradictory: ConstraintSpec = {
+      ...GOOD_LITERAL,
+      evals: { ...GOOD_LITERAL.evals, allow: ['已为您核实，账期是8月。', '请登录 portal 查看'] },
+    } as ConstraintSpec
+    const r = checkSpecHygiene(bundle([contradictory]))
+    expect(r.ok).toBe(false)
+    expect(r.problems.some(p => p.message.includes('自相矛盾'))).toBe(true)
+  })
+
+  it('论证117 B 类说话侧的逐字重复仍然报得出来', () => {
+    const spec: ConstraintSpec = {
+      name: '认人后才能答账号问题', type: 'require-before-say',
+      requires: 'lookup_account', topic: '账号详情',
+      reply: '请先提供学号。', provider: 'p', model: 'm',
+      evals: {
+        deny: [{ before: [], say: '费用是30元。' }],
+        allow: [{ before: ['lookup_account'], say: '费用是30元。' }],
+        heldout: [{ before: [], say: '费用是30元。' }],       // ← 与必拦题相同
+      },
+    }
+    const r = checkSpecHygiene(bundle([spec]))
+    expect(r.ok).toBe(false)
+    expect(r.problems.some(p => p.message.includes('不算留出'))).toBe(true)
+  })
+
   it('论证113 报告排得出可读文本，不通过时说清不该冻结', () => {
     const r = checkSpecHygiene(bundle([{ ...GOOD_LITERAL, evals: { deny: ['x'] } } as ConstraintSpec]))
     const text = formatHygieneReport(r)

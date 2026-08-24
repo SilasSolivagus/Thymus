@@ -13,12 +13,14 @@
  *     拆开后 5/5）。文本里同时出现两类词就该提示拆。
  *   - 「这条表达不了」—— 模型从不主动说这句。所以把它变成必填项：声明文件带一个
  *     `uncovered` 清单，空着就警告。
+ *   - 三组用例自相矛盾 —— 同一道题既写进必拦又写进必放。验收报告必然有一边红，
+ *     但看报告的人不知道红的是题不是插件。
  *
  * 全部不花钱、不调模型、纯静态。跑不过就不该冻结。
  *
  * @module thymus/hygiene
  */
-import type { ConstraintSpec } from './spec.ts'
+import type { ConstraintSpec, DialogueCase, FactSayCase, SequenceCase } from './spec.ts'
 
 /** 一条填不进内置类型的条款。登记它，而不是假装填满了。 */
 export interface UncoveredClause {
@@ -56,6 +58,26 @@ export interface HygieneReport {
 const MUST = ['必须', '应当', '需要先', '才能', '要先']
 /** 表示禁止的词。 */
 const MUST_NOT = ['不得', '禁止', '不许', '不可以', '严禁']
+
+/**
+ * 一条用例的身份。类型不同形状不同，逐条比对之前先归一成同一个键。
+ *
+ * 序列类的身份里带的是「前置成不成立」而不是 `before` 的原文——判定只看这一位，
+ * 所以 `before` 换一组同样不满足前置的工具，那是同一道题。
+ */
+function caseKey(spec: ConstraintSpec, c: unknown): string {
+  if (typeof c === 'string') return c
+  if (spec.type === 'require-before') {
+    const s = c as SequenceCase
+    return `${s.before.includes(spec.requires) ? '前置已成立' : '前置未成立'} → ${s.call}`
+  }
+  if (spec.type === 'require-before-say') {
+    const s = c as FactSayCase
+    return `${s.before.includes(spec.requires) ? '前置已成立' : '前置未成立'} → ${s.say}`
+  }
+  const d = c as DialogueCase
+  return `${d.ask} ／ ${d.reply}`
+}
 
 /** 从一段策略文本里取「」或「"」括起来的例词。 */
 function quotedExamples(text: string): string[] {
@@ -115,16 +137,22 @@ function fakeHeldout(spec: ConstraintSpec): string[] {
   }
   if (spec.type === 'require-before') {
     const exempt = new Set([...spec.unguarded ?? [], spec.requires])
+    const denies = new Set((spec.evals?.deny ?? []).map(c => caseKey(spec, c)))
     for (const c of spec.evals?.heldout ?? []) {
+      const k = caseKey(spec, c)
       if (exempt.has(c.call)) bad.push(`「${c.call}」在免检名单里——这条必不中，是死用例`)
+      else if (denies.has(k)) bad.push(`「${k}」与某条必拦用例相同——不算留出`)
     }
     return bad
   }
   if (spec.type === 'semantic-policy') {
     const examples = quotedExamples(spec.policy)
+    // 这一类的必拦题不一定含引号举过的例词，所以逐字重复要单独查。
+    const denies = new Set(spec.evals?.deny ?? [])
     for (const t of spec.evals?.heldout ?? []) {
       const hit = examples.find(w => t.includes(w))
       if (hit !== undefined) bad.push(`「${t}」直接用了 policy 里举过的例词「${hit}」——不算留出`)
+      if (denies.has(t)) bad.push(`「${t}」与某条必拦用例逐字相同——不算留出`)
     }
     return bad
   }
@@ -173,6 +201,19 @@ export function checkSpecHygiene(bundle: SpecBundle): HygieneReport {
 
     for (const why of fakeHeldout(spec)) {
       problems.push({ level: 'error', spec: spec.name, message: `留出用例是伪装的：${why}` })
+    }
+
+    // 同一道题既要求拦住又要求放行：报告必然有一边红，而看报告的人不知道是题写错了。
+    const e = (spec as unknown as { evals?: Record<string, unknown[]> }).evals
+    const denyKeys = new Set((e?.deny ?? []).map(c => caseKey(spec, c)))
+    for (const c of e?.allow ?? []) {
+      const k = caseKey(spec, c)
+      if (denyKeys.has(k)) {
+        problems.push({
+          level: 'error', spec: spec.name,
+          message: `「${k}」同时写进了必拦和必放——这两组自相矛盾`,
+        })
+      }
     }
 
     const prose = proseOf(spec)
