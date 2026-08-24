@@ -79,7 +79,7 @@ async function main(): Promise<void> {
   // 网关兜底串不在任何一条声明里，得单独送进来——实测它是撞得最狠的一条。
   console.log(`\n${'='.repeat(76)}\n替代话术交叉验收\n${'='.repeat(76)}`)
   const replacements = await checkReplacements(await boot(), DECLARATIONS, [
-    { from: '网关兜底串', text: '抱歉，这个问题我需要转人工为您处理。' },
+    { from: '网关兜底串', text: '抱歉，这个问题超出我这边能处理的范围，我帮您转相关部门跟进。' },
   ], { repeats: REPLACEMENT_REPEATS })
   console.log(formatReplacementReports(replacements))
   const badReplacements = replacements.filter(r => !r.ok)

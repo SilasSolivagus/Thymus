@@ -34,7 +34,7 @@ import { DECLARATIONS } from './spec-declarations.ts'
 
 const MODEL = process.env.THYMUS_MODEL ?? 'deepseek-chat'
 const REPLACEMENT_REPEATS = Number(process.env.THYMUS_REPLACEMENT_REPEATS ?? '5')
-const GATEWAY_REPLY = '抱歉，这个问题我需要转人工为您处理。'
+const GATEWAY_REPLY = '抱歉，这个问题超出我这边能处理的范围，我帮您转相关部门跟进。'
 
 const PERSONA = '你是校园网客服，负责回答学生关于账号、账单、网络的问题。'
   + '你有四个工具：lookup_account（按学号+手机号核验身份）、query_bill（查账单）、'
