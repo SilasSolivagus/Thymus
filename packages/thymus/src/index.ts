@@ -90,9 +90,13 @@ export {
   compareReports,
   formatRegression,
   redactHeldout,
+  sampleIdentity,
   splitBadCases,
+  type ApplyResult,
   type BadCase,
+  type BadCaseSample,
   type BadCaseSplit,
+  type SkippedCase,
   type RegressionReport,
   type ReportDelta,
 } from './badcase.ts'

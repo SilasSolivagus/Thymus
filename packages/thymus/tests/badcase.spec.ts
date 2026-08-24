@@ -7,24 +7,28 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  applyBadCases, compareReports, formatRegression, redactHeldout, splitBadCases,
+  applyBadCases, compareReports, formatRegression, redactHeldout, sampleIdentity, splitBadCases,
   type BadCase,
 } from './thymus-src/badcase.ts'
 import type { ConstraintSpec, SpecEvalReport } from './thymus-src/spec.ts'
 
-const mk = (say: string, verdict: BadCase['verdict'] = 'deny', spec = '服务禁语'): BadCase => ({
-  spec, say, verdict,
+const mk = (sample: BadCase['sample'], verdict: BadCase['verdict'] = 'deny', spec = '服务禁语'): BadCase => ({
+  spec, sample, verdict,
   source: { sessionId: 's-1', seq: 7 },
   by: '标注员甲', at: '2026-08-24',
 })
 
+/** 说话类样本的简写。 */
+const say = (t: string, verdict: BadCase['verdict'] = 'deny', spec = '服务禁语'): BadCase =>
+  mk({ kind: 'say', say: t }, verdict, spec)
+
 const CASES: BadCase[] = [
-  mk('这事我管不了。'),
-  mk('您自己再试试吧。'),
-  mk('我又不是修网络的。'),
-  mk('别问了，我没法弄。'),
-  mk('已为您核实，账期是8月。', 'allow'),
-  mk('这边帮您登记一下。', 'allow'),
+  say('这事我管不了。'),
+  say('您自己再试试吧。'),
+  say('我又不是修网络的。'),
+  say('别问了，我没法弄。'),
+  say('已为您核实，账期是8月。', 'allow'),
+  say('这边帮您登记一下。', 'allow'),
 ]
 
 const SPEC: ConstraintSpec = {
@@ -46,24 +50,25 @@ describe('线上回流 · 分流、遮挡、回归', () => {
   it('论证133 分流是确定性的：同一批样本反复分，结果一模一样', () => {
     const a = splitBadCases(CASES)
     const b = splitBadCases(CASES)
-    expect(a.open.map(c => c.say)).toEqual(b.open.map(c => c.say))
-    expect(a.heldout.map(c => c.say)).toEqual(b.heldout.map(c => c.say))
+    expect(a.open.map(c => sampleIdentity(c.sample))).toEqual(b.open.map(c => sampleIdentity(c.sample)))
+    expect(a.heldout.map(c => sampleIdentity(c.sample))).toEqual(b.heldout.map(c => sampleIdentity(c.sample)))
   })
 
   it('论证134 分流只看内容：换顺序、换标注人都不改变落在哪一侧', () => {
     const base = splitBadCases(CASES)
     const shuffled = splitBadCases([...CASES].reverse().map(c => ({ ...c, by: '标注员乙' })))
-    expect(new Set(shuffled.heldout.map(c => c.say))).toEqual(new Set(base.heldout.map(c => c.say)))
+    expect(new Set(shuffled.heldout.map(c => sampleIdentity(c.sample))))
+      .toEqual(new Set(base.heldout.map(c => sampleIdentity(c.sample))))
   })
 
   it('论证135 换 salt 等于重新洗牌——所以换之前要想清楚', () => {
     const a = splitBadCases(CASES, { salt: '2026Q3' })
     const b = splitBadCases(CASES, { salt: '2026Q4' })
-    expect(a.heldout.map(c => c.say)).not.toEqual(b.heldout.map(c => c.say))
+    expect(a.heldout.map(c => sampleIdentity(c.sample))).not.toEqual(b.heldout.map(c => sampleIdentity(c.sample)))
   })
 
   it('论证136 留出占比大致守得住', () => {
-    const many = Array.from({ length: 400 }, (_v, i) => mk(`第${i}条不同的说法。`))
+    const many = Array.from({ length: 400 }, (_v, i) => say(`第${i}条不同的说法。`))
     const { heldout } = splitBadCases(many, { holdoutRatio: 0.25 })
     expect(heldout.length).toBeGreaterThan(60)
     expect(heldout.length).toBeLessThan(140)
@@ -71,40 +76,93 @@ describe('线上回流 · 分流、遮挡、回归', () => {
 
   it('论证137 并入：公开侧按判定归组，留出侧的 deny 进留出集', () => {
     const split = splitBadCases(CASES)
-    const [merged] = applyBadCases([SPEC], split) as [ConstraintSpec & { evals: Record<string, string[]> }]
+    const merged = applyBadCases([SPEC], split).specs[0] as ConstraintSpec & { evals: Record<string, string[]> }
+    const text = (c: BadCase): string => (c.sample as { say: string }).say
     for (const c of split.open.filter(x => x.verdict === 'deny')) {
-      expect(merged.evals.deny).toContain(c.say)
+      expect(merged.evals.deny).toContain(text(c))
     }
     for (const c of split.heldout.filter(x => x.verdict === 'deny')) {
-      expect(merged.evals.heldout).toContain(c.say)
-      expect(merged.evals.deny).not.toContain(c.say)      // 留出侧的不能同时出现在公开侧
+      expect(merged.evals.heldout).toContain(text(c))
+      expect(merged.evals.deny).not.toContain(text(c))      // 留出侧的不能同时出现在公开侧
     }
   })
 
   it('论证138 留出侧的 allow 照样进 allow——放行类样本藏起来没有意义', () => {
     const split = splitBadCases(CASES)
-    const [merged] = applyBadCases([SPEC], split) as [ConstraintSpec & { evals: Record<string, string[]> }]
+    const merged = applyBadCases([SPEC], split).specs[0] as ConstraintSpec & { evals: Record<string, string[]> }
     for (const c of CASES.filter(x => x.verdict === 'allow')) {
-      expect(merged.evals.allow).toContain(c.say)
-      expect(merged.evals.heldout).not.toContain(c.say)
+      const t = (c.sample as { say: string }).say
+      expect(merged.evals.allow).toContain(t)
+      expect(merged.evals.heldout).not.toContain(t)
     }
   })
 
   it('论证139 并入不重复、不改原对象', () => {
     const split = splitBadCases(CASES)
-    const once = applyBadCases([SPEC], split)
-    const twice = applyBadCases(once, split)
+    const once = applyBadCases([SPEC], split).specs
+    const twice = applyBadCases(once, split).specs
     expect(JSON.stringify(twice)).toBe(JSON.stringify(once))
     expect(SPEC.evals?.deny).toEqual(['这个不可能。'])    // 原对象没被动过
   })
 
-  it('论证140 别的类型原样返回——用例形状不同，不硬并', () => {
+  it('论证140 形状对不上的样本不硬并，而且会被报出来', () => {
     const seq: ConstraintSpec = {
       name: '认人前置', type: 'require-before', requires: 'lookup_account',
       evals: { deny: [{ before: [], call: 'query_bill' }] },
     }
-    const [out] = applyBadCases([seq], splitBadCases(CASES))
-    expect(out).toBe(seq)
+    const wrong = say('这事我管不了。', 'deny', '认人前置')      // 说话类样本错归到工具侧约束
+    const { specs, skipped } = applyBadCases([seq], splitBadCases([wrong]))
+    expect(specs[0]).toBe(seq)                                  // 声明没被动过
+    expect(skipped).toHaveLength(1)
+    expect(skipped[0]!.why).toContain('tool-call')              // 说清它认的是哪种
+  })
+
+  it('论证141a 归到不存在的约束上也要报，不能静默丢', () => {
+    const { skipped } = applyBadCases([SPEC], splitBadCases([say('随便一句', 'deny', '不存在的约束')]))
+    expect(skipped).toHaveLength(1)
+    expect(skipped[0]!.why).toContain('没有叫')
+  })
+
+  it('论证141b 工具侧样本并得进去：no-leak 收产出原文，require-before 收调用序列', () => {
+    const noleak: ConstraintSpec = {
+      name: '内部字段', type: 'no-leak', tool: 'query_bill', field: '_internal_note',
+      evals: { deny: ['金额=30 _internal_note=风控'] },
+    }
+    const seq: ConstraintSpec = {
+      name: '认人前置', type: 'require-before', requires: 'lookup_account',
+      evals: { deny: [{ before: [], call: 'query_bill' }] },
+    }
+    const cases: BadCase[] = [
+      mk({ kind: 'tool-output', text: '金额=45 _internal_note=已升级投诉' }, 'deny', '内部字段'),
+      mk({ kind: 'tool-call', before: [], call: 'export_invoice' }, 'deny', '认人前置'),
+      mk({ kind: 'tool-call', before: ['lookup_account'], call: 'query_bill' }, 'allow', '认人前置'),
+    ]
+    // 全塞进公开侧，好逐条核对归组
+    const { specs, skipped } = applyBadCases([noleak, seq], { open: cases, heldout: [] })
+    expect(skipped).toEqual([])
+    const a = specs[0] as ConstraintSpec & { evals: Record<string, unknown[]> }
+    const b = specs[1] as ConstraintSpec & { evals: Record<string, unknown[]> }
+    expect(a.evals.deny).toContain('金额=45 _internal_note=已升级投诉')
+    expect(b.evals.deny).toContainEqual({ before: [], call: 'export_invoice' })
+    expect(b.evals.allow).toContainEqual({ before: ['lookup_account'], call: 'query_bill' })
+  })
+
+  it('论证141c 事实是集合：记录顺序不同的同一条样本落在同一侧', () => {
+    const a = mk({ kind: 'tool-call', before: ['x', 'y'], call: 'query_bill' }, 'deny', '认人前置')
+    const b = mk({ kind: 'tool-call', before: ['y', 'x'], call: 'query_bill' }, 'deny', '认人前置')
+    expect(sampleIdentity(a.sample)).toBe(sampleIdentity(b.sample))
+    expect(splitBadCases([a]).heldout.length).toBe(splitBadCases([b]).heldout.length)
+  })
+
+  it('论证141d 五种形状的身份互不相同——不同通道的样本不会混成一条', () => {
+    const ids = [
+      sampleIdentity({ kind: 'say', say: 'x' }),
+      sampleIdentity({ kind: 'fact-say', before: [], say: 'x' }),
+      sampleIdentity({ kind: 'dialogue', ask: 'x', reply: 'x' }),
+      sampleIdentity({ kind: 'tool-output', text: 'x' }),
+      sampleIdentity({ kind: 'tool-call', before: [], call: 'x' }),
+    ]
+    expect(new Set(ids).size).toBe(5)
   })
 
   it('论证141 遮挡：留出集只报数量，原文不出现在报告里', () => {
