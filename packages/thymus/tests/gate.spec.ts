@@ -1334,4 +1334,29 @@ describe('说话通道网关 · 会话上下文与自带替代话术', () => {
     expect(a.said).toBe(SAY_REPLACEMENT)                    // 甲在前：乙自带的话术用不上
     expect(b.said).toContain('转相关部门')                   // 换个顺序，说的就是另一句
   })
+
+  it('论证96 声明在前也保护不了：没拦原句的约束，照样被替代话术绕过', async () => {
+    // 这条钉的是「靠声明顺序护不住」——顺序只决定两条都拦时谁的话术赢。
+    // 这里在前的那条**放行了原句**，所以它根本没参与裁决，替代话术直接从它面前过去。
+    const seen: string[] = []
+    const LEAK = '_internal_note=催缴'
+    const firstButSilent: Constraint = {
+      name: '声明在前但没拦原句',
+      say: t => {
+        seen.push(t)
+        return t.includes(LEAK) ? { kind: 'deny', reason: '内部字段' } : { kind: 'allow' }
+      },
+    }
+    const second: Constraint = {
+      name: '声明在后，拦了原句',
+      say: t => t.includes(SAY_BANNED)
+        ? { kind: 'deny', reason: '命中禁语', replacement: `这个我帮您反馈（${LEAK}）。` }
+        : { kind: 'allow' },
+    }
+    const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      installSayGate(ctx, [firstButSilent, second], SAY_REPLACEMENT)
+    })
+    expect(r.said).toContain(LEAK)                          // 照样说出去了
+    expect(seen.some(t => t.includes(LEAK))).toBe(false)    // 在前的那条从没看到过替代话术
+  })
 })
