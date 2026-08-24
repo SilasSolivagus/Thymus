@@ -24,6 +24,12 @@ import { checkSpecHygiene, formatHygieneReport } from '../src/hygiene.ts'
 import { BUNDLE, DECLARATIONS, UNCOVERED } from './spec-declarations.ts'
 
 const REPEATS = Number(process.env.THYMUS_REPEATS ?? '3')
+/**
+ * 替代话术那一轮每条判几次。和评测轮数不是一回事，所以不复用 REPEATS：
+ * 那个是「整套评测跑几遍看方差」，这个是「同一段文本判几次才不漏」。
+ * 5 是实测出来的——最难那条单次命中率只有 0.55（发现 29 六）。
+ */
+const REPLACEMENT_REPEATS = Number(process.env.THYMUS_REPLACEMENT_REPEATS ?? '5')
 
 async function boot(): Promise<Context> {
   const ctx = new Context()
@@ -74,7 +80,7 @@ async function main(): Promise<void> {
   console.log(`\n${'='.repeat(76)}\n替代话术交叉验收\n${'='.repeat(76)}`)
   console.log(formatReplacementReports(await checkReplacements(await boot(), DECLARATIONS, [
     { from: '网关兜底串', text: '抱歉，这个问题我需要转人工为您处理。' },
-  ], { repeats: REPEATS })))
+  ], { repeats: REPLACEMENT_REPEATS })))
 
   console.log(`\n${'='.repeat(76)}\n填不进声明的条款（${UNCOVERED.length} 条）\n${'='.repeat(76)}`)
   for (const u of UNCOVERED) console.log(`\n· ${u.clause}\n  ${u.why}`)
