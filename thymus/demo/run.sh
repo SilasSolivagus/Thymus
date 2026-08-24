@@ -20,6 +20,8 @@ cp "$ROOT"/packages/thymus/src/*.ts "$DSH/thymus-demo/src/"
 cp "$ROOT"/thymus/demo/*.ts "$DSH/thymus-demo/demo/"
 mkdir -p "$DSH/thymus-demo/campus"
 cp "$ROOT"/thymus/campus/*.ts "$DSH/thymus-demo/campus/" 2>/dev/null || true
+# SPEC.md 也要拷：有脚本把它当输入喂给模型（author-spec）。
+cp "$ROOT"/thymus/campus/*.md "$DSH/thymus-demo/campus/" 2>/dev/null || true
 cd "$DSH"
 # 这台机器要走代理（HTTP_PROXY）。curl 认这个变量，Node 的 fetch 默认不认，
 # 不加这个开关就会直连超时，adapter 报 TRANSPORT——而插件侧的 catch 不触发

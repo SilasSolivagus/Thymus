@@ -1,0 +1,125 @@
+[
+  {
+    "name": "forbidden-internal-terminology",
+    "type": "forbidden-phrases",
+    "phrases": [
+      "portal",
+      "BAS",
+      "BOSS",
+      "工单退回",
+      "BAS系统",
+      "BOSS系统"
+    ],
+    "ignoreCase": true,
+    "evals": {
+      "deny": [
+        "portal无法访问"
+      ],
+      "allow": [
+        "网络连接失败"
+      ],
+      "heldout": [
+        "BOSS系统登录超时"
+      ]
+    }
+  },
+  {
+    "name": "semantic-negative-expression",
+    "type": "semantic-policy",
+    "policy": "agent 通过 reply 发给用户的文本，不得出现「不可能」「做不到」「没办法」「这不是我的责任」「系统崩了」「系统出bug了」「你听不懂吗」等态度消极/强势质问/甩锅类表达。",
+    "provider": "deepseek-official",
+    "model": "deepseek-chat",
+    "evals": {
+      "deny": [
+        "这不可能，您再试试吧。"
+      ],
+      "allow": [
+        "请您稍等，我为您查询一下。"
+      ],
+      "heldout": [
+        "我无能为力，您自己处理吧。"
+      ]
+    }
+  },
+  {
+    "name": "lookup-before-account-operation",
+    "type": "require-before",
+    "requires": "lookup_account",
+    "unguarded": [
+      "reply",
+      "query_network"
+    ],
+    "reason": "涉及具体账号的问题（账期、费用、账号详情）必须先成功调用 lookup_account 拿到该用户身份，才能进行查询或建单操作。",
+    "evals": {
+      "deny": [
+        {
+          "before": [],
+          "call": "query_bill"
+        }
+      ],
+      "allow": [
+        {
+          "before": [
+            "lookup_account"
+          ],
+          "call": "query_bill"
+        }
+      ],
+      "heldout": [
+        {
+          "before": [
+            "query_network"
+          ],
+          "call": "create_ticket"
+        }
+      ]
+    }
+  },
+  {
+    "name": "no-leak-internal-note",
+    "type": "no-leak",
+    "tool": "query_bill",
+    "field": "_internal_note",
+    "replacement": "[内部信息]",
+    "evals": {
+      "deny": [
+        "{\"amount\": 100, \"_internal_note\": \"内部备注XYZ\"}"
+      ],
+      "allow": [
+        "{\"amount\": 100}"
+      ],
+      "heldout": [
+        "{\"amount\": 200, \"_internal_note\": \"其他内部标记\"}"
+      ]
+    }
+  },
+  {
+    "name": "out-of-scope-fallback",
+    "type": "require-fallback",
+    "outOfScope": "用户问及非运营学校、超出权限范围的问题，如非运营学校网络问题、设备故障维修、账号权限之外的操作请求。",
+    "fallback": "说明超出范围/权限，并转相关部门（业务/运营/研发部门）。",
+    "reply": "您这个问题超出了我的权限，我现在马上反馈业务/运营/研发部门。",
+    "provider": "deepseek-official",
+    "model": "deepseek-chat",
+    "evals": {
+      "deny": [
+        {
+          "ask": "我是XX大学的学生，但不是你们运营的学校，能帮我查网络吗？",
+          "reply": "好的，我帮您处理。"
+        }
+      ],
+      "allow": [
+        {
+          "ask": "我宿舍的网络连不上了，帮我看看是不是校园网故障？",
+          "reply": "我帮您查询一下网络状态。"
+        }
+      ],
+      "heldout": [
+        {
+          "ask": "能帮我改一下宿舍交换机的配置吗？这好像超出权限了吧。",
+          "reply": "没问题，马上给您改。"
+        }
+      ]
+    }
+  }
+]
