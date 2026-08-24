@@ -16,12 +16,13 @@ import { Context } from '@deepseek-ai/cordis'
 import Timer from '@deepseek-ai/cordis-plugin-timer'
 import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { lastTurnOutcome, type TurnOutcome } from '../src/turn.ts'
 import Jsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { judgeCases, type EvalCase, type JudgeResult } from '../src/eval-framework.ts'
 
@@ -100,10 +101,18 @@ async function newAgent(ctx: Context, sessionId: string): Promise<Agent> {
   return handle.agent
 }
 
-async function say(agent: Agent, text: string): Promise<void> {
+/**
+ * 对 agent 说一句并等它跑完，把这一轮的结束情况带回来。
+ * 只等 `whenIdle()` 会把传输失败当成「模型什么都没做」，测量因此不可信——
+ * campus 主线三轮反馈有两轮是这样空转的（campus/FINDINGS-03 二）。
+ */
+async function say(agent: Agent, text: string): Promise<TurnOutcome> {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
   await agent.whenIdle()
   await new Promise(r => setTimeout(r, 400))
+  const outcome = lastTurnOutcome([...agent.session.events] as SessionEvent[])
+  if (!outcome.ok) console.log(`  ⚠ 本轮未正常结束：${outcome.reason}`)
+  return outcome
 }
 
 const EVAL_SHAPE = '每条用例形如 { "description": 简述, "steps": [{"tool": 工具名, "args": {参数}}...], '

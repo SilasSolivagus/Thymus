@@ -391,8 +391,14 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   改成等公开的持久化屏障 `ctx.sessions.flush(session)`，同一条件下 3/3 通过。
   同类写法（固定 sleep）在 `hotswap.spec.ts` 和 `gate.spec.ts` 还有几处，但那几处是
   故意制造竞争窗口用的，不是等落盘，没动。
-- 其余 demo（`../demo/spec-composite`、`spec-tiers`、`spec-evals`、`run`、`self-authored`）
-  的 `say()` 仍是旧写法，不检查 turn 结束原因。要重跑哪个先换掉。
+- ~~其余 demo 的 `say()` 仍是旧写法，不检查 turn 结束原因~~ **已换**：五个都改了。
+  `spec-composite` / `spec-tiers` / `spec-evals` 的 `say()` 与 campus 主线同形——返回
+  `TurnOutcome`、未正常结束就打警告；`run` / `self-authored` 没有 say() helper，
+  在 `whenIdle()` 之后就地 `checkTurn(agent)`。
+  没跟着抄那句 400ms sleep：它（`8f0b298`）比 `turn.ts`（`cecf5b9`）还早，不是为这个
+  检查加的，而 `gate.spec.ts:663` 长期是 `whenIdle()` 之后不等直接读 `turn/end`。
+  `DEMO=run` 真跑一遍验证过：两轮都没打警告，说明真模型路径下 `turn/end` 那时已经在了。
+  已有的 400ms 保留没动——那是另一件事，不在这次范围里。
 
 ## 运行方式
 

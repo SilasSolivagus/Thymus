@@ -17,6 +17,7 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
 import * as ToolCordis from '@deepseek-ai/dsh-tool-cordis'
+import { lastTurnOutcome } from '../src/turn.ts'
 import { apply, init, view, type TrajectoryEvidence } from '../src/trajectory.ts'
 
 const MODEL = process.env.THYMUS_MODEL ?? 'deepseek-chat'
@@ -107,6 +108,15 @@ function report(events: readonly SessionEvent[], from: number): number {
   return events.length
 }
 
+/**
+ * 看这一轮是怎么结束的。模型侧传输失败时 `whenIdle()` 照样返回，不看就会把空转
+ * 记成结果——campus 主线三轮反馈有两轮是这样空转的（campus/FINDINGS-03 二）。
+ */
+function checkTurn(agent: Agent): void {
+  const outcome = lastTurnOutcome([...agent.session.events] as SessionEvent[])
+  if (!outcome.ok) console.log(`  ⚠ 本轮未正常结束：${outcome.reason}`)
+}
+
 async function main(): Promise<void> {
   if (!process.env.DEEPSEEK_API_KEY) throw new Error('缺少 DEEPSEEK_API_KEY')
   const ctx = await boot()
@@ -120,6 +130,7 @@ async function main(): Promise<void> {
   console.log(`  用户：${ASK_RULE.split('\n')[0]}…\n`)
   agent.followup(createUserMessage({ content: [{ type: 'text', text: ASK_RULE }], source: { kind: 'user' } }))
   await agent.whenIdle()
+  checkTurn(agent)
   let seen = report([...agent.session.events], 0)
 
   // 模型到底有没有动用 cordis 那套工具
@@ -133,6 +144,7 @@ async function main(): Promise<void> {
   console.log(`  用户：${ASK_VIOLATE}\n`)
   agent.followup(createUserMessage({ content: [{ type: 'text', text: ASK_VIOLATE }], source: { kind: 'user' } }))
   await agent.whenIdle()
+  checkTurn(agent)
   seen = report([...agent.session.events], seen)
 
   box('结果')

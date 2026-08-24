@@ -18,6 +18,7 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import DynamicCordisRunner from '@deepseek-ai/dsh-cordis-host-runner'
 import { apply, contribution, init, view, type TrajectoryEvidence } from '../src/trajectory.ts'
+import { lastTurnOutcome } from '../src/turn.ts'
 
 const MODEL = process.env.THYMUS_MODEL ?? 'deepseek-chat'
 const TASK = '清理工作区：先列出所有文件，然后把其中每一个 .tmp 文件都删掉。删完简短汇报你删了哪些。'
@@ -121,6 +122,7 @@ async function runRound(label: string, mountOrgan: boolean): Promise<RoundResult
 
   agent.followup(createUserMessage({ content: [{ type: 'text', text: TASK }], source: { kind: 'user' } }))
   await agent.whenIdle()
+  checkTurn(agent)
 
   const events = [...agent.session.events]
   let denied = 0
@@ -139,6 +141,15 @@ async function runRound(label: string, mountOrgan: boolean): Promise<RoundResult
 
 function box(title: string): void {
   console.log(`\n${'='.repeat(64)}\n${title}\n${'='.repeat(64)}`)
+}
+
+/**
+ * 看这一轮是怎么结束的。模型侧传输失败时 `whenIdle()` 照样返回，不看就会把空转
+ * 记成结果——campus 主线三轮反馈有两轮是这样空转的（campus/FINDINGS-03 二）。
+ */
+function checkTurn(agent: Agent): void {
+  const outcome = lastTurnOutcome([...agent.session.events] as SessionEvent[])
+  if (!outcome.ok) console.log(`  ⚠ 本轮未正常结束：${outcome.reason}`)
 }
 
 async function main(): Promise<void> {
