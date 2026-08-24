@@ -73,7 +73,7 @@
 | 26 | 说话侧首字延迟＝整段生成时间；并发不串；B 缺口用 `require-before-say` 补上 | `FINDINGS-26-say-cost-and-b2.md` |
 | 27 | `require-before-say` 真模型验收：判得住，但**替代话术会被自己的规矩拦下** | `FINDINGS-27-b2-real-model.md` |
 | 28 | 注册数上限真链路验到；去重仍无证据；回流补上工具侧五种样本形状 | `FINDINGS-28-quota-and-toolside-reflow.md` |
-| 29 | 替代话术不过闸，且说哪句由声明顺序定；为 A2/B2 写的话术在越界语境下不满足 D | `FINDINGS-29-replacement-crossclass.md` |
+| 29 | 替代话术不过闸，说哪句由声明顺序定；真 agent 上越界的 10 轮里 4 轮兜底义务被顶掉 | `FINDINGS-29-replacement-crossclass.md` |
 
 **分层结论：写规矩，模型能；判自己写得对不对，现在不能；语义那部分，机制上够到边了，
 模型也会走，但它第一版有相当比例会把旧机制留在前门、收益自己抵消
