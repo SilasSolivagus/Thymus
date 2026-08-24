@@ -4,6 +4,7 @@
  * 问的是两件事：
  *   一、四类约束用内置类型填得满吗？填不进去的是哪几条？（见 `spec-declarations.ts` 的 UNCOVERED）
  *   二、填进去的那些，验收过不过？留出集这一层各类各是什么水平？
+ *   三、拒绝时换上去的那句话，自己合不合别的规矩？（发现 29——它发出前不再过闸）
  *
  * 语义类要真模型，所以整轮花钱。跑法：
  *   DEMODIR=campus DEMO=check-spec-full ./thymus/demo/run.sh
@@ -15,7 +16,9 @@ import LlmRuntime from '@deepseek-ai/dsh-llm'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { checkSpecEvals, formatSpecEvalReports } from '../src/spec.ts'
+import {
+  checkReplacements, checkSpecEvals, formatReplacementReports, formatSpecEvalReports,
+} from '../src/spec.ts'
 import type { SpecEvalReport } from '../src/spec.ts'
 import { checkSpecHygiene, formatHygieneReport } from '../src/hygiene.ts'
 import { BUNDLE, DECLARATIONS, UNCOVERED } from './spec-declarations.ts'
@@ -65,6 +68,13 @@ async function main(): Promise<void> {
     const over = [...new Set(rs.flatMap(r => r.allow.overreached))]
     if (over.length > 0) console.log(`  被误拦过：\n    ${over.join('\n    ')}`)
   })
+
+  // 替代话术自己也要验收：它发出之前不再过闸，违反什么都不会有位置发现（发现 29）。
+  // 网关兜底串不在任何一条声明里，得单独送进来——实测它是撞得最狠的一条。
+  console.log(`\n${'='.repeat(76)}\n替代话术交叉验收\n${'='.repeat(76)}`)
+  console.log(formatReplacementReports(await checkReplacements(await boot(), DECLARATIONS, [
+    { from: '网关兜底串', text: '抱歉，这个问题我需要转人工为您处理。' },
+  ], { repeats: REPEATS })))
 
   console.log(`\n${'='.repeat(76)}\n填不进声明的条款（${UNCOVERED.length} 条）\n${'='.repeat(76)}`)
   for (const u of UNCOVERED) console.log(`\n· ${u.clause}\n  ${u.why}`)

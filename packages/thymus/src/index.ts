@@ -35,8 +35,10 @@ export {
 } from './gate.ts'
 
 export {
+  checkReplacements,
   checkSpecEvals,
   compileConstraints,
+  formatReplacementReports,
   formatSpecEvalReports,
   type ConstraintSpec,
   type DialogueCase,
@@ -48,6 +50,8 @@ export {
   type NoLeakSpec,
   type RequireBeforeSaySpec,
   type RequireBeforeSpec,
+  type ReplacementHit,
+  type ReplacementReport,
   type RequireFallbackSpec,
   type SemanticPolicySpec,
   type SequenceCase,

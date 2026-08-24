@@ -576,6 +576,128 @@ export async function checkSpecEvals(
   return reports
 }
 
+/** 一条替代话术撞上的约束。 */
+export interface ReplacementHit {
+  /** 哪条约束判它违规。 */
+  constraint: string
+  reason: string
+  /** 判定时用的触发语境，给人看的一句话。 */
+  trigger: string
+}
+
+/** 一条替代话术的交叉验收结果。 */
+export interface ReplacementReport {
+  /** 这句话是谁的替代话术。 */
+  from: string
+  text: string
+  hits: ReplacementHit[]
+  /** 没撞上任何约束才为真。为假就不该冻结。 */
+  ok: boolean
+}
+
+/**
+ * 把每条约束的触发条件构造出来：要判「这句话在那个语境下站不站得住」，
+ * 得先把那个语境摆出来。
+ *
+ * `require-fallback` 用它自己声明的必拦提问当越界语境——没有声明必拦用例就构造不出
+ * 触发条件，这条约束这一轮就判不了（机械闸本来就不让这种声明冻结）。
+ */
+function triggerContexts(spec: ConstraintSpec): { context: SayContext; trigger: string }[] {
+  if (spec.type === 'require-fallback') {
+    return (spec.evals?.deny ?? []).map(c => ({
+      context: {
+        messages: [{
+          role: 'user', content: [{ type: 'text', text: c.ask }], source: { kind: 'user' },
+        }] as unknown as readonly Message[],
+      },
+      trigger: `用户问「${c.ask}」`,
+    }))
+  }
+  if (spec.type === 'require-before-say') {
+    return [{
+      context: {
+        messages: [],
+        caller: { sessionId: 'replacement-check', events: [], succeeded: new Set<string>() },
+      },
+      trigger: '前置事实未成立',
+    }]
+  }
+  return [{ context: { messages: [] }, trigger: '无语境' }]
+}
+
+/**
+ * 替代话术的交叉验收：拒绝换来的那句话，自己合不合别的规矩。
+ *
+ * 为什么必须单独验（发现 29）：替代话术是固定串，网关拿到 deny 之后把它直接塞进正文块，
+ * **发出之前不再经过裁决**——它违反什么都不会有任何位置发现。而它是为某一条规矩的
+ * 触发条件写的，换个语境就不一定站得住：实测里为 A2／B2 写的话术在越界语境下
+ * 每条都不满足 D 的兜底义务。
+ *
+ * 每条替代话术拿**所有**约束判一遍，包括它自己那条——发现 27 里 B2 的替代话术被 B2
+ * 自己判成「涉及账号」，那条手写规矩（把替代话术放进 allow 用例）这一步顺带机械化了。
+ *
+ * 要调模型，所以属于花钱那一轮，不进 `checkSpecHygiene`。
+ *
+ * @param ctx - 宿主 context。
+ * @param specs - 约束声明。
+ * @param extra - 声明之外的替代话术，比如 `installSayGate` 那个网关兜底串——
+ *   它不在任何一条声明里，不送进来就查不到。
+ * @param options - `repeats` 是每个语境判几次，缺省 1。**语义判定有方差**：
+ *   同一条网关兜底串实测过 3/3、2/3 和 0/1 三种结果，判一次会漏。要拿它当冻结闸就往上调，
+ *   代价是模型调用翻倍。任一次判违规即记一次撞上。
+ * @returns 每条替代话术一份报告；任一 `ok` 为假就不应冻结。
+ */
+export async function checkReplacements(
+  ctx: Context,
+  specs: readonly ConstraintSpec[],
+  extra: readonly { from: string; text: string }[] = [],
+  options: { repeats?: number } = {},
+): Promise<ReplacementReport[]> {
+  const repeats = Math.max(1, options.repeats ?? 1)
+  const compiled = compileConstraints(ctx, specs)
+  const targets: { from: string; text: string }[] = [
+    ...specs.flatMap(s => {
+      const reply = (s as { reply?: unknown }).reply
+      return typeof reply === 'string' ? [{ from: s.name, text: reply }] : []
+    }),
+    ...extra,
+  ]
+  const reports: ReplacementReport[] = []
+  for (const t of targets) {
+    const hits: ReplacementHit[] = []
+    for (let i = 0; i < specs.length; i++) {
+      const spec = specs[i]!
+      const c = compiled[i]!
+      if (c.say === undefined) continue                 // 工具侧的约束管不到说的话
+      let hit: ReplacementHit | undefined
+      for (const { context, trigger } of triggerContexts(spec)) {
+        for (let n = 0; n < repeats && hit === undefined; n++) {
+          const v = await c.say(t.text, 'text', context)
+          if (v.kind === 'deny') hit = { constraint: spec.name, reason: v.reason, trigger }
+        }
+        // 一条约束只记第一个撞上的语境，够定位了，不刷屏。
+        if (hit !== undefined) break
+      }
+      if (hit !== undefined) hits.push(hit)
+    }
+    reports.push({ ...t, hits, ok: hits.length === 0 })
+  }
+  return reports
+}
+
+/** 把替代话术的交叉验收排成一段可读文本。 */
+export function formatReplacementReports(reports: readonly ReplacementReport[]): string {
+  const bad = reports.filter(r => !r.ok)
+  const lines = reports.map(r => [
+    `${r.ok ? '✓' : '✗'} [${r.from}]「${r.text}」`,
+    ...r.hits.map(h => `    撞上 ${h.constraint}（${h.trigger}）：${h.reason}`),
+  ].join('\n'))
+  const head = bad.length === 0
+    ? `✓ ${reports.length} 条替代话术都没撞上别的规矩`
+    : `✗ ${bad.length}/${reports.length} 条替代话术自己违规，不应冻结`
+  return [head, ...lines].join('\n')
+}
+
 /** 把验收报告排成一段可读文本，给交付时贴进记录用。 */
 export function formatSpecEvalReports(reports: readonly SpecEvalReport[]): string {
   const lines = reports.map(r => {

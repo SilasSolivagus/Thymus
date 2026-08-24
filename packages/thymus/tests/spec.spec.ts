@@ -14,7 +14,8 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { gateSay, installToolGate, type Constraint } from './thymus-src/gate.ts'
 import {
-  checkSpecEvals, compileConstraints, formatSpecEvalReports, type ConstraintSpec,
+  checkReplacements, checkSpecEvals, compileConstraints, formatSpecEvalReports,
+  type ConstraintSpec,
 } from './thymus-src/spec.ts'
 
 /** 假判定器：按语义关键词答「违规／合规」，模拟一个真的语义判定模型。 */
@@ -608,5 +609,87 @@ describe('约束声明 · B 类说话侧', () => {
     const [r] = await checkSpecEvals(ctx, [BEFORE_SAY])
     expect(r!.ok).toBe(true)                                    // 必拦必放照样全过
     expect(r!.heldout).toMatchObject({ caught: 0, total: 1 })   // ← 判别力只在留出集
+  })
+})
+
+
+/** 一个适配器同时服务三种判定协议：按 system 提示词里的词表切换答案。 */
+class MixedJudge extends LlmAdapter {
+  readonly inputs: string[] = []
+  constructor(private readonly bad: (input: string) => boolean) { super() }
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const system = (options as unknown as { system?: string }).system ?? ''
+    const last = options.messages[options.messages.length - 1]
+    const part = last?.content.find(c => c.type === 'text')
+    const input = part?.type === 'text' ? part.text : ''
+    this.inputs.push(input)
+    const bad = this.bad(input)
+    const verdict = system.includes('未兜底') ? (bad ? '未兜底' : '已兜底')
+      : system.includes('不涉及') ? (bad ? '涉及' : '不涉及')
+        : (bad ? '违规' : '合规')
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: verdict }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: verdict } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+// ── 替代话术的交叉验收：拒绝换来的那句话，自己合不合别的规矩 ──
+// 发现 29：替代话术是固定串，发出前不再过闸，它违反什么都不会被发现。
+// 所以它得在冻结那一轮被别的约束judge 一遍。
+describe('替代话术交叉验收 · checkReplacements', () => {
+  const LITERAL_PORTAL: ConstraintSpec = {
+    name: '内部术语不外泄', type: 'forbidden-phrases', phrases: ['portal'],
+  }
+
+  it('论证133 替代话术撞上另一条约束，报出来并说清是谁', async () => {
+    const dirty = { ...BEFORE_SAY, reply: '请登录 portal 后先提供学号。' } as ConstraintSpec
+    const ctx = await boot(new MixedJudge(() => false))
+    const reports = await checkReplacements(ctx, [LITERAL_PORTAL, dirty])
+    const r = reports.find(x => x.from === BEFORE_SAY.name)
+    expect(r!.ok).toBe(false)
+    expect(r!.hits.map(h => h.constraint)).toContain('内部术语不外泄')
+  })
+
+  it('论证134 干净的替代话术不报', async () => {
+    const ctx = await boot(new MixedJudge(() => false))
+    const reports = await checkReplacements(ctx, [LITERAL_PORTAL, BEFORE_SAY])
+    expect(reports.every(r => r.ok)).toBe(true)
+  })
+
+  it('论证135 D 类判定拿它自己声明的越界提问当语境，不是「拿不到上下文」', async () => {
+    const judge = new MixedJudge(threeWay)
+    const ctx = await boot(judge)
+    const reports = await checkReplacements(ctx, [FALLBACK, BEFORE_SAY])
+    const r = reports.find(x => x.from === BEFORE_SAY.name)
+    // B2 的替代话术在越界语境下没做到兜底——这正是发现 29 那个形状
+    expect(r!.hits.some(h => h.constraint === FALLBACK.name)).toBe(true)
+    expect(r!.hits.every(h => !h.reason.includes('拿不到会话上下文'))).toBe(true)
+    expect(judge.inputs.some(i => i.includes('我在XX学校，你们能修吗'))).toBe(true)
+  })
+
+  it('论证137 判定有方差：判一次会漏，repeats 把它捞回来', async () => {
+    // 第 2 次才说违规的判定器——真实模型上就是这个形状（网关兜底串实测 2/3、3/3、0/1）
+    let n = 0
+    const flaky: ConstraintSpec = {
+      name: '服务禁语', type: 'semantic-policy', policy: '不得消极',
+      provider: 'judge', model: 'judge',
+    }
+    const ctx = await boot(new MixedJudge(() => ++n === 2))
+    const once = await checkReplacements(ctx, [flaky], [{ from: '网关兜底', text: '抱歉。' }])
+    expect(once[0]!.ok).toBe(true)                               // 判一次：漏了
+    n = 0
+    const thrice = await checkReplacements(ctx, [flaky], [{ from: '网关兜底', text: '抱歉。' }], { repeats: 3 })
+    expect(thrice[0]!.ok).toBe(false)                            // 判三次：抓到
+  })
+
+  it('论证136 网关兜底串不在声明里，得能一起送进来查', async () => {
+    const ctx = await boot(new MixedJudge(() => false))
+    const reports = await checkReplacements(ctx, [LITERAL_PORTAL], [
+      { from: '网关兜底', text: '抱歉，请登录 portal 自助处理。' },
+    ])
+    const r = reports.find(x => x.from === '网关兜底')
+    expect(r!.ok).toBe(false)
+    expect(r!.hits.map(h => h.constraint)).toContain('内部术语不外泄')
   })
 })
