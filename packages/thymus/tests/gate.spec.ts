@@ -1290,7 +1290,7 @@ describe('说话通道网关 · 会话上下文与自带替代话术', () => {
     expect(got).toBe('missing')
   })
 
-  it('论证94 替代话术不再过闸：它撞上另一条约束，那条约束一次都不响', async () => {
+  it('论证94 替代话术要再过一遍闸：撞上另一条约束就退到网关兜底串', async () => {
     // 记录第二条约束看到过哪些文本——它该看到原句，不该看到替代话术。
     const seen: string[] = []
     const LEAK = '_internal_note=催缴'
@@ -1310,8 +1310,9 @@ describe('说话通道网关 · 会话上下文与自带替代话术', () => {
     const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
       installSayGate(ctx, [withReplacement, noLeak], SAY_REPLACEMENT)
     })
-    expect(r.said).toContain(LEAK)                          // ← 替代话术原样出去
-    expect(seen.some(t => t.includes(LEAK))).toBe(false)    // ← C 从没看到过那句话
+    expect(seen.some(t => t.includes(LEAK))).toBe(true)     // ← C 判过那句替代话术
+    expect(r.said).not.toContain(LEAK)                      // ← 所以它没说出去
+    expect(r.said).toBe(SAY_REPLACEMENT)                    // ← 退到网关兜底串
   })
 
   it('论证95 两条约束同时拒绝时，说出去的那句由声明顺序定——不只是报错文案', async () => {
@@ -1335,9 +1336,9 @@ describe('说话通道网关 · 会话上下文与自带替代话术', () => {
     expect(b.said).toContain('转相关部门')                   // 换个顺序，说的就是另一句
   })
 
-  it('论证96 声明在前也保护不了：没拦原句的约束，照样被替代话术绕过', async () => {
-    // 这条钉的是「靠声明顺序护不住」——顺序只决定两条都拦时谁的话术赢。
-    // 这里在前的那条**放行了原句**，所以它根本没参与裁决，替代话术直接从它面前过去。
+  it('论证96 没拦原句的约束也够得着替代话术——再裁决那一轮它参与', async () => {
+    // 顺序只决定两条都拦时谁的话术赢。这里在前的那条**放行了原句**，
+    // 所以它没参与第一轮裁决——替代话术那一轮它才够得着。
     const seen: string[] = []
     const LEAK = '_internal_note=催缴'
     const firstButSilent: Constraint = {
@@ -1356,7 +1357,44 @@ describe('说话通道网关 · 会话上下文与自带替代话术', () => {
     const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
       installSayGate(ctx, [firstButSilent, second], SAY_REPLACEMENT)
     })
-    expect(r.said).toContain(LEAK)                          // 照样说出去了
-    expect(seen.some(t => t.includes(LEAK))).toBe(false)    // 在前的那条从没看到过替代话术
+    expect(seen.some(t => t.includes(LEAK))).toBe(true)     // 再裁决那一轮它看到了
+    expect(r.said).toBe(SAY_REPLACEMENT)                    // 于是拦住，退到网关兜底串
+  })
+
+  it('论证97 网关兜底串是终点：只多判一轮，不接着往下退', async () => {
+    // 必须收敛。终点那句的干净由冻结闸保证（checkReplacements 把它当必查项），
+    // 不能靠运行时一路往下退——发现 27 已经证明替代话术会被规矩拦下。
+    const first: Constraint = {
+      name: '甲：拦原句，自带话术',
+      say: t => t.includes(SAY_BANNED)
+        ? { kind: 'deny', reason: '甲', replacement: '甲的话术。' }
+        : { kind: 'allow' },
+    }
+    let secondCalls = 0
+    const second: Constraint = {
+      name: '乙：什么都拦，也自带话术',
+      say: () => { secondCalls++; return { kind: 'deny', reason: '乙', replacement: '乙的话术。' } },
+    }
+    const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      installSayGate(ctx, [first, second], SAY_REPLACEMENT)
+    })
+    expect(r.said).toBe(SAY_REPLACEMENT)                    // 退到终点，而不是接着换成乙的话术
+    expect(secondCalls).toBe(2)                             // 原句一轮 + 甲的话术一轮，到此为止
+  })
+
+  it('论证98 开药方的那条不参与再裁决——不然它的误判会变成运行时后果', async () => {
+    // B2 那条实测就是这个形状：它的替代话术「请先提供学号」被它自己判成「涉及账号」
+    // （发现 27，更像误判）。让它参与再裁决，范围内的提问也会退到越界兜底话术。
+    // 自己开的药方自己合不合规，由冻结闸盯（checkReplacements 含自指）。
+    let calls = 0
+    const selfDenying: Constraint = {
+      name: '连自己的话术也拦',
+      say: () => { calls++; return { kind: 'deny', reason: '一律拒绝', replacement: '我的话术。' } },
+    }
+    const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      installSayGate(ctx, [selfDenying], SAY_REPLACEMENT)
+    })
+    expect(r.said).toBe('我的话术。')                        // 它的话术照样发出去
+    expect(calls).toBe(1)                                   // 再裁决里没有它，所以只判了原句
   })
 })

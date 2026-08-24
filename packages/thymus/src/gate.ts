@@ -160,6 +160,19 @@ export async function adjudicate(
   ask: (c: Constraint) => (Verdict | Promise<Verdict>) | undefined,
   timeoutMs: number = DEFAULT_VERDICT_TIMEOUT_MS,
 ): Promise<Verdict> {
+  return (await adjudicateIndexed(constraints, ask, timeoutMs)).verdict
+}
+
+/**
+ * 与 {@link adjudicate} 同一套语义，另外带回是**哪一条**给出的 deny（`index`，
+ * 全 allow 时为 -1）。说话通道要它：替代话术再过闸时，开药方的那条不参与
+ * （论证98）。不导出——这是网关内部的需要。
+ */
+async function adjudicateIndexed(
+  constraints: readonly Constraint[],
+  ask: (c: Constraint) => (Verdict | Promise<Verdict>) | undefined,
+  timeoutMs: number = DEFAULT_VERDICT_TIMEOUT_MS,
+): Promise<{ verdict: Verdict; index: number }> {
   const verdicts = await Promise.all(constraints.map(async (c): Promise<Verdict> => {
     // ask(c) 本身要放进 try：同步抛错的约束不能逃过裁决直接冒到调用方。
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -179,7 +192,8 @@ export async function adjudicate(
       if (timer !== undefined) clearTimeout(timer)
     }
   }))
-  return verdicts.find((v): v is { kind: 'deny'; reason: string } => v.kind === 'deny') ?? { kind: 'allow' }
+  const index = verdicts.findIndex(v => v.kind === 'deny')
+  return { verdict: index === -1 ? { kind: 'allow' } : verdicts[index]!, index }
 }
 
 /** 工具结果形状里这一层要构造或改写的部分。 */
@@ -536,14 +550,31 @@ export function installSayGate(
           messages: options.messages,
           ...caller === undefined ? {} : { caller },
         }
-        const [textVerdict, reasoningVerdict] = await Promise.all([
-          text === '' ? ALLOW : adjudicate(constraints, c => c.say?.(text, 'text', context), timeoutMs),
+        const [textDecision, reasoningVerdict] = await Promise.all([
+          text === '' ? { verdict: ALLOW, index: -1 } : adjudicateIndexed(constraints, c => c.say?.(text, 'text', context), timeoutMs),
           reasoning === '' ? ALLOW : adjudicate(constraints, c => c.say?.(reasoning, 'reasoning', context), timeoutMs),
         ])
+        const textVerdict = textDecision.verdict
         const denied = { text: textVerdict.kind === 'deny', reasoning: reasoningVerdict.kind === 'deny' }
         if (!denied.text && !denied.reasoning) { yield * buffered; return }
         // 约束自带的替代话术优先：它知道该改说什么，网关那句是兜底的兜底。
-        const say = textVerdict.kind === 'deny' ? textVerdict.replacement ?? replacement : replacement
+        const first = textVerdict.kind === 'deny' ? textVerdict.replacement ?? replacement : replacement
+        // 替代话术自己也要过一遍闸：它是为某一条规矩的触发条件写的，换个语境不一定站得住，
+        // 而放行它就等于让另一条规矩的义务落空（发现 29：真 agent 上越界的 10 轮里 4 轮）。
+        //
+        // **只再判一轮，终点是网关兜底串。** 退不动就得停，否则替代话术被拦之后拿什么换
+        // 是个没有底的问题（发现 27：替代话术会被自己的规矩拦下）。终点那句的干净由冻结闸
+        // 保证——`checkReplacements` 把网关兜底串当必查项。
+        // 自带话术就是网关那句时不必再判：判了也只能退到它自己。
+        // 开药方的那条不参与：它的替代话术合不合它自己的规矩，由冻结闸盯着
+        // （`checkReplacements` 含自指）。放进来的话，B2 那种自撞的误判会变成运行时后果
+        // ——实测范围内的提问也会退到越界兜底话术（论证98）。
+        const others = constraints.filter((_, i) => i !== textDecision.index)
+        const say = first === replacement || others.length === 0 || (await adjudicate(
+          others, c => c.say?.(first, 'text', context), timeoutMs,
+        )).kind !== 'deny'
+          ? first
+          : replacement
         yield * rewriteSay(buffered, denied, say)
       })(),
     }

@@ -112,14 +112,19 @@ function instrument(constraints: readonly Constraint[], trace: Trace): Constrain
 }
 
 /**
- * 网关实际吐出去的那句：按声明顺序取第一条 deny，用它自带的替代话术，没有就用网关兜底串
- * （论证95：顺序决定说哪句）。
+ * 网关实际吐出去的那句。
+ *
+ * 第一候选按声明顺序取第一条 deny 自带的替代话术（论证95：顺序决定说哪句）；但那句自己
+ * 也要再过一遍闸，被拦就退到网关兜底串（论证94）。这里不重算裁决，直接看会话文本里
+ * 出现的是哪一句——网关怎么判是它的事，这个脚本只观测结果。
  */
-function emitted(denials: readonly Denial[]): string | undefined {
+function emitted(denials: readonly Denial[], sessionText: string): string | undefined {
   if (denials.length === 0) return undefined
   const order = (d: Denial): number => DECLARATIONS.findIndex(s => s.name === d.name)
-  const first = [...denials].sort((a, b) => order(a) - order(b))[0]!
-  return first.replacement ?? GATEWAY_REPLY
+  const first = [...denials].sort((a, b) => order(a) - order(b))[0]!.replacement ?? GATEWAY_REPLY
+  if (sessionText.includes(first)) return first
+  if (sessionText.includes(GATEWAY_REPLY)) return GATEWAY_REPLY
+  return first
 }
 
 async function boot(): Promise<Context> {
@@ -184,13 +189,13 @@ async function main(): Promise<void> {
     const events = [...agent.session.events] as SessionEvent[]
     const outcome = lastTurnOutcome(events)
     if (!outcome.ok) console.log(`  ⚠ 本轮未正常结束：${outcome.reason}`)
-    const out = emitted(trace.denials)
     const allText = events.map(e => {
       const x = e as { type?: string; data?: { message?: { content?: { type?: string; text?: string }[] } } }
       return x.type === 'assistant/message'
         ? (x.data?.message?.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('')
         : ''
     }).join('\n')
+    const out = emitted(trace.denials, allText)
     rows.push({
       q: q.text, outOfScope: q.outOfScope, denied: [...new Set(trace.denials.map(d => d.name))],
       ...out === undefined ? {} : { emitted: out },
