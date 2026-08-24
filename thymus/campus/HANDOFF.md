@@ -131,7 +131,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   断言看的是**模型在下一轮请求里实际收到的 tool-result**，不是我们自己的返回值
   （论证59–63，不花钱）。四条对照：老写法在真 agent 上 execute 命中 0 次、
   无网关时内部字段确实漏、缺 `error` 时拒绝理由被换成序列化错误发给模型、
-  抹除只动该动的字段。测试 13 files / 182 passed。
+  抹除只动该动的字段。测试 14 files / 194 passed。
 
 - **说话侧挂载点——已探，见发现 17**（`probe-say-mount.ts`，脚本化 adapter，不花钱）。
   `ctx.llm.stream` 命中 0 次，是第二个 `execute`；agent 走 `preparedCall.stream()`。
@@ -149,7 +149,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   验收八条走真 agent 路径（论证69–77，脚本化 adapter，不花钱）：挂 `ctx.llm.stream`
   命中 0 次的对照、无网关时禁语落库的阳性对照、`assistant/chunk` 里也没有禁语
   （证明没先放行再改）、reasoning 分开判且不与正文拼接、只判正文会漏的对照、
-  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 13 files / 182 passed。
+  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 14 files / 194 passed。
 
 - **B 类的状态——已探，见发现 18**（`probe-b-state.ts`）。三条结论：
   状态**不用自己存**，从 `agent.session.events` 现读就够（`tool/call` 的名字与
@@ -226,6 +226,13 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   dsh 这侧比预想的紧：**已注册的工具名动不了**，冒牌工具换不掉 `verify_identity`。
   但**名字先到先得**——动态插件抢先注册 `query_bill`，宿主随后注册真版被拒、冒牌版
   生效。因此部署纪律扩写成架构结论 19：先装约束、先注册完全部受管工具，再放行动态插件。
+
+- **线上回流——已做**（`packages/thymus/src/badcase.ts`，论证133–144）。
+  `splitBadCases`（按内容哈希确定性分流，不能重抽）、`applyBadCases`（并进声明，
+  留出侧的 deny 进留出集、allow 仍进 allow）、`redactHeldout`（留出只报数字不报原文）、
+  `compareReports`（与上一版比，任一组掉了都算回归，含留出集与被删掉的约束）。
+  三条纪律由代码保证，不靠自觉。「算不算违规」必须人判，这一栏没有自动化余地。
+  工作单加了「上线之后：每天回流」一节。
 
 **再往下**：
 - **`propose_tool` 真 agent 端到端——已做，见发现 24**（`probe-propose-agent.ts`，三臂各 3 轮）。
@@ -325,7 +332,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 ## 运行方式
 
 - 探针/demo：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
-- 测试：`./thymus/run-tests.sh`（应为 13 files / 182 passed）
+- 测试：`./thymus/run-tests.sh`（应为 14 files / 194 passed）
 - `spec-plugins.ts` 顶层已改为「仅直接执行时运行」。**其他 campus 脚本不要 import 它**
   之外的实验脚本前先确认同样有这个判断——曾因顶层无条件 `main()` 被 import 触发重跑，
   覆盖过冻结的 `evals.json`（从 `../trajectories/_no-cwd/campus-author/session.jsonl`

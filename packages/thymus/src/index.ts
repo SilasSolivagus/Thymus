@@ -84,3 +84,15 @@ export {
   type ProposeToolHandle,
   type ToolProposal,
 } from './propose.ts'
+
+export {
+  applyBadCases,
+  compareReports,
+  formatRegression,
+  redactHeldout,
+  splitBadCases,
+  type BadCase,
+  type BadCaseSplit,
+  type RegressionReport,
+  type ReportDelta,
+} from './badcase.ts'

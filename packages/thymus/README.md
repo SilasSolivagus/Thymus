@@ -160,6 +160,24 @@ has nothing outside the built-in types, and a model authoring the declaration ne
 off — writing held-out cases, splitting mixed clauses, deciding what is inexpressible, and
 tuning wording — and says at each step what the machine checks for you.
 
+## After it ships: the daily reflow
+
+Production traffic is the best source of held-out cases — a real user really said it, and
+the SOP never listed it. `splitBadCases()` / `applyBadCases()` fold human-labelled samples
+into the eval set under three mechanical disciplines, each of them forced by a measurement:
+
+- **A human decides whether a sample is a violation.** Live traffic has no ground truth;
+  letting the model label its own is the self-grading loop we measured — near-perfect
+  self-report, 8/13 against an outside yardstick.
+- **The split is deterministic** (content hash), so nobody can re-draw until the held-out
+  side only has easy ones.
+- **The held-out side reports counts, not text** (`redactHeldout()`). Seeing the text means
+  editing against it, which measures patching-to-the-diff, not generalization.
+
+`compareReports()` diffs against the previous run; any group dropping is a regression,
+held-out included — wording is an uncontrolled variable, and editing one line for a new
+sample easily breaks an old one.
+
 ## Design rules
 
 These were not designed up front. Each one came out of a run where we thought something was blocked and it was not.
