@@ -384,8 +384,13 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 - ~~fail-open / fail-closed 路径零失败~~ **已打，见发现 15**：两侧兜底都是假的。
   `ctx.llm.stream` 失败时不抛错，发 error finish 后正常结束，try/catch 不触发。
   已加 `judgeText()` 把静默失败翻成异常；判定调用一律走它。
-- `thymus-recording.spec.ts` 偶发失败（`persistence.list()` 偶尔读不到 rec-1），两跑一挂，
-  既有问题，未查。跑到它挂就重跑。
+- ~~`thymus-recording.spec.ts` 偶发失败（`persistence.list()` 偶尔读不到 rec-1）~~
+  **已查已修**：根因是测试等固定 300ms 等落盘，而 JSONL 后端的写是批量延迟的
+  （`writeBatchMaxDelayMs` 缺省 200ms），整套并行跑时那 100ms 余量不够。
+  判决性实验：把批延迟调到 1000ms，失败从偶发变成 3/3 稳定复现，报错一字不差。
+  改成等公开的持久化屏障 `ctx.sessions.flush(session)`，同一条件下 3/3 通过。
+  同类写法（固定 sleep）在 `hotswap.spec.ts` 和 `gate.spec.ts` 还有几处，但那几处是
+  故意制造竞争窗口用的，不是等落盘，没动。
 - 其余 demo（`../demo/spec-composite`、`spec-tiers`、`spec-evals`、`run`、`self-authored`）
   的 `say()` 仍是旧写法，不检查 turn 结束原因。要重跑哪个先换掉。
 

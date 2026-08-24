@@ -64,7 +64,10 @@ describe('Thymus 录制：dsh 持久化即记录器与评估依据', () => {
     })
     handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'use the tool' }], source: { kind: 'user' } }))
     await handle.agent.whenIdle()
-    await new Promise(r => setTimeout(r, 300))
+    // 落盘是批量延迟写的（`writeBatchMaxDelayMs` 缺省 200ms），`whenIdle` 只保证 agent
+    // 这一轮跑完，不保证写完。等固定时长会在机器忙的时候漏——整套测试并行跑时实测偶发
+    // `expected [] to include 'rec-1'`。`ctx.sessions.flush` 是公开的持久化屏障，等它。
+    await ctx.sessions.flush(handle.agent.session)
 
     // 内存里的证据
     const memFold = (evts: readonly SessionEvent[]) => {
@@ -102,7 +105,7 @@ describe('Thymus 录制：dsh 持久化即记录器与评估依据', () => {
     })
     handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }))
     await handle.agent.whenIdle()
-    await new Promise(r => setTimeout(r, 300))
+    await ctx.sessions.flush(handle.agent.session)
 
     const reader = new Context()
     await reader.plugin(SessionStore)
