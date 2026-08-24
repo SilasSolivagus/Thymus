@@ -338,8 +338,8 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
    发现 11 的质量结论已撤回。留下的新问题：双峰的成因不知道，也没有加样本坐实。
 1. ~~空插件组基线做成 `eval-framework.ts` 的不变量~~ **已做，落在 `0466eac`**：
    `checkEvalGradient`（`eval-framework.ts`）+ 4 条测试（`eval-framework.spec.ts`），
-   已从 `index.ts` 导出。`thymus/campus/check-empty-baseline.ts` 因此成了冗余脚本，
-   `check-a2-gradient.ts` 用的已经是框架里的函数。
+   已从 `index.ts` 导出。原先的独立脚本 `check-empty-baseline.ts` 因此冗余，已删；
+   `check-a2-gradient.ts` 用的就是框架里的函数（工具桩另在 `spec-plugins.ts`）。
    **注意它只覆盖自造插件那条路**（`EvalCase[]` + 插件源码，跑在真运行时上）。
    交付走的声明那条路（填表 → `checkSpecHygiene` → `checkSpecEvals`）**做不了这个基线**，
    已消融验过：`probesOf` 造的探针直接调被测约束自己的钩子，判定的唯一来源就是那条约束，
