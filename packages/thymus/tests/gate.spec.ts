@@ -1289,4 +1289,49 @@ describe('说话通道网关 · 会话上下文与自带替代话术', () => {
     await gateSay(ctx, '您好', [needsContext])
     expect(got).toBe('missing')
   })
+
+  it('论证94 替代话术不再过闸：它撞上另一条约束，那条约束一次都不响', async () => {
+    // 记录第二条约束看到过哪些文本——它该看到原句，不该看到替代话术。
+    const seen: string[] = []
+    const LEAK = '_internal_note=催缴'
+    const withReplacement: Constraint = {
+      name: 'A 服务禁语',
+      say: t => t.includes(SAY_BANNED)
+        ? { kind: 'deny', reason: '命中禁语', replacement: `这个我帮您反馈相关部门（${LEAK}）。` }
+        : { kind: 'allow' },
+    }
+    const noLeak: Constraint = {
+      name: 'C 内部字段不外泄',
+      say: t => {
+        seen.push(t)
+        return t.includes(LEAK) ? { kind: 'deny', reason: '内部字段' } : { kind: 'allow' }
+      },
+    }
+    const r = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      installSayGate(ctx, [withReplacement, noLeak], SAY_REPLACEMENT)
+    })
+    expect(r.said).toContain(LEAK)                          // ← 替代话术原样出去
+    expect(seen.some(t => t.includes(LEAK))).toBe(false)    // ← C 从没看到过那句话
+  })
+
+  it('论证95 两条约束同时拒绝时，说出去的那句由声明顺序定——不只是报错文案', async () => {
+    const first: Constraint = {
+      name: '先声明的（不带替代话术）',
+      say: t => t.includes(SAY_BANNED) ? { kind: 'deny', reason: '甲' } : { kind: 'allow' },
+    }
+    const second: Constraint = {
+      name: '后声明的（自带替代话术）',
+      say: t => t.includes(SAY_BANNED)
+        ? { kind: 'deny', reason: '乙', replacement: '您这个问题超出我的权限，我帮您转相关部门。' }
+        : { kind: 'allow' },
+    }
+    const a = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      installSayGate(ctx, [first, second], SAY_REPLACEMENT)
+    })
+    const b = await runSayAgent(sayChunks(SAY_BANNED), ctx => {
+      installSayGate(ctx, [second, first], SAY_REPLACEMENT)
+    })
+    expect(a.said).toBe(SAY_REPLACEMENT)                    // 甲在前：乙自带的话术用不上
+    expect(b.said).toContain('转相关部门')                   // 换个顺序，说的就是另一句
+  })
 })

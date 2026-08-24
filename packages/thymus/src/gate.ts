@@ -152,7 +152,8 @@ export interface Constraint {
  * @param constraints - 参与本次裁决的约束。
  * @param ask - 向单条约束取判决；返回 undefined 表示该约束不管这个通道。
  * @param timeoutMs - 单条约束的判决超时，缺省 {@link DEFAULT_VERDICT_TIMEOUT_MS}。
- * @returns 第一条 deny（按约束声明顺序取，只影响报错文案），或 allow。
+ * @returns 第一条 deny（按约束声明顺序取），或 allow。**顺序不只影响报错文案**：
+ *   替代话术跟着这条 deny 走，所以它决定用户看到的那句话（发现 29 / 论证95）。
  */
 export async function adjudicate(
   constraints: readonly Constraint[],
