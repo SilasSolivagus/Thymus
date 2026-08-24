@@ -491,3 +491,122 @@ describe('约束声明 · D 类越界兜底', () => {
     expect(formatSpecEvalReports([r!])).toContain('判定器的能力边界在这里')
   })
 })
+
+// ── B 类的说话侧：说到某类内容之前必须先有某个事实 ──
+// 这是 require-before 的另一半：那一条拦「未认人不许去查」，这一条拦「未认人不许说出来」。
+// 判定顺序是省钱的关键：事实成立就直接放行，不问模型。
+
+/** 假判定器：按关键词答「涉及／不涉及」，并记下被问了几次。 */
+class TopicJudge extends LlmAdapter {
+  asked = 0
+  constructor(private readonly restricted: string[]) { super() }
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.asked++
+    const last = options.messages[options.messages.length - 1]
+    const part = last?.content.find(c => c.type === 'text')
+    const input = part?.type === 'text' ? part.text : ''
+    const verdict = this.restricted.some(w => input.includes(w)) ? '涉及' : '不涉及'
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: verdict }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: verdict } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+const BEFORE_SAY: ConstraintSpec = {
+  name: '认人后才能答账号问题',
+  type: 'require-before-say',
+  requires: 'lookup_account',
+  topic: '具体账号的账期、费用、认证状态等账号详情',
+  reply: '麻烦您先提供一下学号、手机号码，这边为您查询。',
+  provider: 'judge', model: 'judge',
+  evals: {
+    deny: [{ before: [], say: '您本月的费用是30元。' }],
+    allow: [
+      { before: ['lookup_account'], say: '您本月的费用是30元。' },
+      { before: [], say: '麻烦您先提供一下学号、手机号码。' },
+    ],
+    heldout: [{ before: [], say: '您的认证状态是正常的。' }],
+  },
+}
+
+/** 构造一个带事实的说话上下文。 */
+const asFacts = (before: string[]): { messages: never; caller: never } => ({
+  messages: [] as never,
+  caller: { sessionId: 's', events: [], succeeded: new Set(before) } as never,
+})
+
+describe('约束声明 · B 类说话侧', () => {
+  it('论证125 事实不成立又说了受限内容就拦下，并给出前置话术', async () => {
+    const ctx = await boot(new TopicJudge(['费用', '账期', '认证状态']))
+    const [c] = compileConstraints(ctx, [BEFORE_SAY])
+    const v = await c!.say!('您本月的费用是30元。', 'text', asFacts([]))
+    expect(v.kind).toBe('deny')
+    expect(v.kind === 'deny' && v.replacement).toBe('麻烦您先提供一下学号、手机号码，这边为您查询。')
+  })
+
+  it('论证126 事实成立就直接放行，而且不问模型——正常会话里每一句都不花钱', async () => {
+    const judge = new TopicJudge(['费用'])
+    const ctx = await boot(judge)
+    const [c] = compileConstraints(ctx, [BEFORE_SAY])
+    const v = await c!.say!('您本月的费用是30元。', 'text', asFacts(['lookup_account']))
+    expect(v.kind).toBe('allow')
+    expect(judge.asked).toBe(0)
+  })
+
+  it('论证127 事实不成立但没讲受限内容，照样放行', async () => {
+    const ctx = await boot(new TopicJudge(['费用']))
+    const [c] = compileConstraints(ctx, [BEFORE_SAY])
+    expect((await c!.say!('麻烦您先提供一下学号。', 'text', asFacts([]))).kind).toBe('allow')
+  })
+
+  it('论证128 拿不到调用方身份按拒绝计——没有身份不等于没有违规', async () => {
+    const ctx = await boot(new TopicJudge(['费用']))
+    const [c] = compileConstraints(ctx, [BEFORE_SAY])
+    const v = await c!.say!('您本月的费用是30元。', 'text', { messages: [] as never })
+    expect(v.kind).toBe('deny')
+    expect(v.kind === 'deny' && v.reason).toContain('拿不到调用方身份')
+  })
+
+  it('论证129 思考块不判——它不是说给用户的话', async () => {
+    const judge = new TopicJudge(['费用'])
+    const ctx = await boot(judge)
+    const [c] = compileConstraints(ctx, [BEFORE_SAY])
+    expect((await c!.say!('用户还没认人，先想想费用怎么说', 'reasoning', asFacts([]))).kind).toBe('allow')
+    expect(judge.asked).toBe(0)
+  })
+
+  it('论证130 判定器含糊按涉及计——含糊不能变成放行', async () => {
+    const ctx = await boot(new TopicJudge([]))
+    const bogus = { ...BEFORE_SAY } as ConstraintSpec
+    const c2 = compileConstraints(await boot(new (class extends LlmAdapter {
+      async * stream(): AsyncIterable<StreamChunk> {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: '看情况' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: '看情况' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    })()), [bogus])
+    void ctx
+    const v = await c2[0]!.say!('您本月的费用是30元。', 'text', asFacts([]))
+    expect(v.kind).toBe('deny')
+    expect(v.kind === 'deny' && v.reason).toContain('含糊')
+  })
+
+  it('论证131 验收用例跑得起来：三组各归各的', async () => {
+    const ctx = await boot(new TopicJudge(['费用', '账期', '认证状态']))
+    const [r] = await checkSpecEvals(ctx, [BEFORE_SAY])
+    expect(r!.ok).toBe(true)
+    expect(r!.deny).toMatchObject({ caught: 1, total: 1 })
+    expect(r!.allow).toMatchObject({ kept: 2, total: 2 })
+    expect(r!.heldout).toMatchObject({ caught: 1, total: 1 })
+  })
+
+  it('论证132 阳性对照：topic 写窄了，留出集立刻掉下来', async () => {
+    // 判定器只认「费用」，不认「认证状态」——等价于 topic 只写了费用
+    const ctx = await boot(new TopicJudge(['费用', '账期']))
+    const [r] = await checkSpecEvals(ctx, [BEFORE_SAY])
+    expect(r!.ok).toBe(true)                                    // 必拦必放照样全过
+    expect(r!.heldout).toMatchObject({ caught: 0, total: 1 })   // ← 判别力只在留出集
+  })
+})

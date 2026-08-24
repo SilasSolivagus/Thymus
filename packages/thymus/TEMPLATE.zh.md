@@ -74,6 +74,25 @@
 之外——实测过，agent 被拦住之后会连造几个新工具试图绕过，白名单挡住了，黑名单挡不住。
 `requires` 自己永远免检，不用写进 `unguarded`。
 
+### `require-before-say` — 说到某类内容之前必须先有某个事实
+
+```ts
+{
+  name: '认人后才能答账号问题',
+  type: 'require-before-say',
+  requires: 'lookup_account',                 // 会话事实：这个工具成功调用过
+  topic: '具体账号的账期、费用、账号详情',      // 什么算受限，照抄条款
+  reply: '麻烦您先提供一下学号、手机号码，这边为您查询。',
+  provider: 'deepseek-official', model: 'deepseek-chat',
+  evals: { deny: [...], allow: [...], heldout: [...] },   // 每条是 { before, say }
+}
+```
+
+**跟 `require-before` 配成一对用**：那条拦「不许去查」，这条拦「不许说出来」。
+只写一条就只覆盖一侧——光拦住取数据，模型仍可能凭对话里已有的信息作答。
+
+事实成立时它直接放行、不问模型，所以认过人之后的每一句都不额外花钱。
+
 ### `no-leak` — 内部字段不外泄
 
 ```ts
@@ -130,9 +149,10 @@ heldout 请登录后台管理系统查看      ← 同一件事，没有共同�
 **下面这些都不是留出用例**（机器会替你查出来，但先别写）：
 
 ```
-✗ BOSS系统登录超时              含着已声明的词，必中
-✗ 这个不可能办到                直接用了 policy 里举过的例词
-✗ {before: [], call: 'query_network'}   免检工具，必不中，死用例
+✗ BOSS系统登录超时                      含着已声明的词，必中
+✗ 这个不可能办到                        直接用了 policy 里举过的例词
+✗ {before: [], call: 'query_network'}    免检工具，必不中，死用例
+✗ {before: ['lookup_account'], say: …}   前置事实已成立，必不中，死用例
 ```
 
 **`allow` 那一组不能省。** 过度拦截只有它抓得住——实测过一次：某条规矩写宽之后

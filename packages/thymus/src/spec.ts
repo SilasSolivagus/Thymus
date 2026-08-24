@@ -197,9 +197,56 @@ export interface RequireFallbackSpec extends SpecBase {
   evals?: DialogueEvalDeclaration
 }
 
+/**
+ * B 类说话侧的一条验收用例：**本会话已成立哪些事实，然后说了什么**。
+ */
+export interface FactSayCase {
+  /** 这句话之前已经成功调用过的工具。 */
+  before: string[]
+  /** agent 打算说的那句。 */
+  say: string
+}
+
+/** B 类说话侧的验收用例。 */
+export interface FactSayEvalDeclaration {
+  /** 必须被拦住的：事实不成立却说了受限内容。 */
+  deny?: FactSayCase[]
+  /** 必须放行的：事实成立后正常回答，以及不涉及受限内容的话。 */
+  allow?: FactSayCase[]
+  /** 留出用例：**换一种说法讲同一类内容**，条款原文没举过的那种。 */
+  heldout?: FactSayCase[]
+}
+
+/**
+ * 说到某类内容之前必须先有某个事实。对应 SOP 里「认人之后才能答账号问题」那一类。
+ *
+ * 这是 {@link RequireBeforeSpec} 的说话侧对应物，两条一起用才覆盖得全：
+ * 那一条拦的是「未认人不许**去查**」，这一条拦的是「未认人不许**说出来**」。
+ * 只有前者时，模型仍可能凭对话里已有的信息作答——实测过一份真实 SOP，
+ * 这一侧原先表达不了，只能登记进 `uncovered`。
+ *
+ * 判定顺序是省钱的关键：**事实成立就直接放行，不问模型**。只有事实不成立时才花一次
+ * 调用去判「这句话是不是在讲受限内容」。正常会话里认过人之后的每一句都不花钱。
+ *
+ * 拿不到调用方身份时按拒绝计——「没有身份」不能当成「没有违规」。
+ */
+export interface RequireBeforeSaySpec extends SpecBase {
+  type: 'require-before-say'
+  /** 前置事实：这个工具在本会话里成功调用过。 */
+  requires: string
+  /** 什么内容算受限，照抄条款原文。 */
+  topic: string
+  /** 拦下时改说的话，随判决交给网关。 */
+  reply: string
+  provider: string
+  model: string
+  evals?: FactSayEvalDeclaration
+}
+
 /** 一条约束声明。 */
 export type ConstraintSpec =
-  ForbiddenPhrasesSpec | SemanticPolicySpec | NoLeakSpec | RequireBeforeSpec | RequireFallbackSpec
+  ForbiddenPhrasesSpec | SemanticPolicySpec | NoLeakSpec | RequireBeforeSpec
+  | RequireFallbackSpec | RequireBeforeSaySpec
 
 /** 判定器的系统提示词。只陈述条款并要求二选一，不给它发挥空间。 */
 const JUDGE_SYSTEM = (policy: string): string => [
@@ -237,6 +284,14 @@ function lastUserAsk(messages: readonly Message[]): string | undefined {
   }
   return undefined
 }
+
+/** B 类说话侧判定器的系统提示词。只判「这句话在不在讲那类内容」，不判别的。 */
+const TOPIC_SYSTEM = (topic: string): string => [
+  '你是客服话术判定器。以下内容属于「受限内容」：',
+  topic,
+  '判断给定的一句客服话术有没有讲到受限内容。',
+  '只回答一个词：涉及 或 不涉及。不要解释，不要输出别的。',
+].join('\n')
 
 /** 把一条声明编译成运行时约束。 */
 function compileOne(ctx: Context, spec: ConstraintSpec): Constraint {
@@ -298,6 +353,28 @@ function compileOne(ctx: Context, spec: ConstraintSpec): Constraint {
         if (raw.includes('未越界') || raw.includes('已兜底')) return { kind: 'allow' }
         // 含糊不能变成放行，与语义类一致。
         return deny(`判定器答得含糊（「${raw.slice(0, 20)}」），按未兜底计`)
+      },
+    }
+  }
+  if (spec.type === 'require-before-say') {
+    const deny = (reason: string): Verdict => ({ kind: 'deny', reason: `${spec.name}：${reason}`, replacement: spec.reply })
+    return {
+      name: spec.name,
+      say: async (text: string, channel: SayChannel, context?: SayContext): Promise<Verdict> => {
+        if (channel !== 'text') return { kind: 'allow' }
+        if (context?.caller === undefined) return deny('拿不到调用方身份，确认不了前置事实')
+        // 事实成立就放行，不问模型——正常会话里认过人之后的每一句都不花钱。
+        if (context.caller.succeeded.has(spec.requires)) return { kind: 'allow' }
+        const options: GenerateOptions = {
+          provider: spec.provider, model: spec.model,
+          system: TOPIC_SYSTEM(spec.topic),
+          messages: [{ role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }],
+        } as GenerateOptions
+        const raw = (await judgeText(ctx, options)).trim()
+        if (raw.includes('不涉及')) return { kind: 'allow' }
+        if (raw.includes('涉及')) return deny(`本次会话尚未完成「${spec.requires}」，不能说受限内容`)
+        // 含糊按涉及计，与其它语义判定一致。
+        return deny(`判定器答得含糊（「${raw.slice(0, 20)}」），按涉及计`)
       },
     }
   }
@@ -391,6 +468,23 @@ function probesOf(
       denied: async (): Promise<boolean> => {
         const caller: Caller = { sessionId: 'spec-eval', events: [], succeeded: new Set(c.before) }
         const v = await only.preTool!({ name: c.call, arguments: {}, caller })
+        return v.kind === 'deny'
+      },
+    })
+    const e = spec.evals
+    return {
+      deny: (e?.deny ?? []).map(probe),
+      allow: (e?.allow ?? []).map(probe),
+      heldout: (e?.heldout ?? []).map(probe),
+    }
+  }
+  if (spec.type === 'require-before-say') {
+    // 直接构造调用方身份，不伪造会话事件——与 require-before 同一个理由（发现 18）。
+    const probe = (c: FactSayCase): EvalProbe => ({
+      label: `${c.before.join('+') || '（无前置）'} → ${c.say}`,
+      denied: async (): Promise<boolean> => {
+        const caller: Caller = { sessionId: 'spec-eval', events: [], succeeded: new Set(c.before) }
+        const v = await only.say!(c.say, 'text', { messages: [], caller })
         return v.kind === 'deny'
       },
     })

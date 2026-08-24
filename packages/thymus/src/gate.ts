@@ -55,6 +55,16 @@ export type SayChannel = 'text' | 'reasoning'
 export interface SayContext {
   /** 这次请求发给模型的完整对话。注意工具结果的 `role` 也是 `user`，靠 `source.kind` 区分。 */
   messages: readonly Message[]
+  /**
+   * 说这句话的是谁，以及这个会话里已经成立的事实。
+   *
+   * 「认人之前不许说账号的事」这一类要同时看两样：会话事实（认过人没有）和这句话在
+   * 讲什么。事实从这里来，与工具侧 {@link ToolCall.caller} 同源同口径。
+   *
+   * **可能没有**：宿主没装 agent 注册表，或这条流不属于某个已注册的 agent。
+   * 要它的约束在这种情况下应当拒绝，而不是当成「没有身份＝没有违规」。
+   */
+  caller?: Caller
 }
 
 /** 一条约束多久不给判决就按 deny 计。挂住的约束不能变成放行。 */
@@ -450,6 +460,22 @@ function* rewriteSay(
   }
 }
 
+/**
+ * 按 sessionId 取调用方身份。
+ *
+ * 说话侧只在 `stream(options)` 这一层拿得到 sessionId（`prepareCall` 的 config 里没有，
+ * 实测过），会话日志要顺着 agent 注册表回查。注册表没装就没有身份——不编一个空的顶上。
+ */
+function callerOfSession(ctx: Context, sessionId: string | undefined): Caller | undefined {
+  if (sessionId === undefined) return undefined
+  const agents = (ctx as unknown as { get(name: string): unknown }).get('agents') as
+    { get(id: string): { id?: string; session?: { events?: readonly SessionEvent[] } } | undefined } | undefined
+  const agent = agents?.get(sessionId)
+  const events = agent?.session?.events
+  if (agent?.id === undefined || events === undefined) return undefined
+  return callerOf(agent.id, events)
+}
+
 /** `ctx.llm` 上这一层要包的入口。 */
 interface LlmEntry {
   prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>
@@ -504,7 +530,11 @@ export function installSayGate(
         const reasoning = joinBlocks(blocks, 'reasoning')
         // 两条通道分开判，并行取判决——延迟取慢的那条，不累加。空的那条不判：
         // 没说话就没有可裁决的对象，也省掉一次语义判定的模型调用。
-        const context: SayContext = { messages: options.messages }
+        const caller = callerOfSession(ctx, (options as { sessionId?: string }).sessionId)
+        const context: SayContext = {
+          messages: options.messages,
+          ...caller === undefined ? {} : { caller },
+        }
         const [textVerdict, reasoningVerdict] = await Promise.all([
           text === '' ? ALLOW : adjudicate(constraints, c => c.say?.(text, 'text', context), timeoutMs),
           reasoning === '' ? ALLOW : adjudicate(constraints, c => c.say?.(reasoning, 'reasoning', context), timeoutMs),

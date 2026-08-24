@@ -59,6 +59,19 @@ const specs: ConstraintSpec[] = [
     },
   },
   {
+    name: 'verify-before-telling',
+    type: 'require-before-say',
+    requires: 'lookup_account',                    // a session fact: that tool succeeded earlier
+    topic: 'billing period, charges, or any account detail',
+    reply: 'Could I have your student ID and phone number first, so I can look that up?',
+    provider: 'deepseek-official', model: 'deepseek-chat',
+    evals: {                                       // cases pair session facts with an utterance
+      deny:  [{ before: [], say: 'Your bill this month is 30 yuan.' }],
+      allow: [{ before: ['lookup_account'], say: 'Your bill this month is 30 yuan.' }],
+      heldout: [{ before: [], say: 'That account was opened in September 2024.' }],
+    },
+  },
+  {
     name: 'out-of-scope-handoff',
     type: 'require-fallback',
     outOfScope: 'schools we do not operate; anything beyond front-line authority',
@@ -82,6 +95,13 @@ const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
 installToolGate(ctx, constraints)
 installSayGate(ctx, constraints, 'Sorry — let me hand this to a human colleague.')
 ```
+
+`require-before-say` is the speech-side half of `require-before`: that one blocks
+*looking the data up*, this one blocks *saying it*. Use both or you cover one side only —
+with the lookup blocked but the utterance free, the model can still answer from what the
+conversation already contains. The order it judges in is what keeps it cheap: **when the
+fact holds it allows immediately, with no model call**, so every sentence after the caller
+is verified costs nothing.
 
 `require-fallback` is the odd one out: every other type is a prohibition — "if the bad thing
 appears, block it" — while this one is a **conditional positive obligation**: *when* the

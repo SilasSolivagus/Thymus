@@ -73,6 +73,7 @@ function proseOf(spec: ConstraintSpec): string {
   if (spec.type === 'semantic-policy') parts.push(spec.policy)
   if (spec.type === 'require-fallback') parts.push(spec.outOfScope, spec.fallback)
   if (spec.type === 'require-before' && spec.reason !== undefined) parts.push(spec.reason)
+  if (spec.type === 'require-before-say') parts.push(spec.topic)
   return parts.join('\n')
 }
 
@@ -124,6 +125,17 @@ function fakeHeldout(spec: ConstraintSpec): string[] {
     for (const t of spec.evals?.heldout ?? []) {
       const hit = examples.find(w => t.includes(w))
       if (hit !== undefined) bad.push(`「${t}」直接用了 policy 里举过的例词「${hit}」——不算留出`)
+    }
+    return bad
+  }
+  if (spec.type === 'require-before-say') {
+    const said = new Set((spec.evals?.deny ?? []).map(c => c.say))
+    for (const c of spec.evals?.heldout ?? []) {
+      if (c.before.includes(spec.requires)) {
+        bad.push(`「${c.say}」的前置事实已经成立——这条必不中，是死用例`)
+      } else if (said.has(c.say)) {
+        bad.push(`「${c.say}」与某条必拦用例逐字相同——不算留出`)
+      }
     }
     return bad
   }

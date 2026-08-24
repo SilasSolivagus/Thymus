@@ -54,9 +54,8 @@ const A2: ConstraintSpec = {
 /**
  * B 认人前置。
  *
- * **这一条只做到了 SPEC 原文的一半**，见 {@link UNCOVERED}：原文管的是「未认人不得
- * 回复账号相关内容」，声明能表达的是「未认人不得调取账号数据」。取数据这一侧拦住，
- * 说话那一侧靠的是 C 类同一个道理——拿不到就说不出来。
+ * 这一条管的是「未认人不得**调取**账号数据」；原文里「不得**回复**账号相关内容」
+ * 那一半由 {@link B2} 管。两条一对，缺一条就漏一侧。
  */
 const B: ConstraintSpec = {
   name: 'B 认人前置',
@@ -75,6 +74,33 @@ const B: ConstraintSpec = {
     ],
     // 声明里一个字都没提过的同类工具——白名单写法下它应当照样受管
     heldout: [{ before: [], call: 'export_bill_pdf' }],
+  },
+}
+
+/**
+ * B 的说话那一侧：认人之后才能答账号问题。
+ *
+ * 这条原先填不进去，登记在 {@link UNCOVERED} 里——内置类型只能按工具名判前置，
+ * 判不了「这段话是不是在讲账号详情」。`require-before-say` 补上了这个缺口：
+ * 事实（认过人没有）从会话日志现读，内容（是不是在讲账号）交给判定器。
+ *
+ * 它跟 {@link B} 是一对：那条拦「未认人不许**去查**」，这条拦「未认人不许**说出来**」。
+ */
+const B2: ConstraintSpec = {
+  name: 'B2 认人后才能答账号问题',
+  type: 'require-before-say',
+  requires: 'lookup_account',
+  topic: '具体账号的账期、费用、账号详情',
+  reply: '麻烦您先提供一下学号、手机号码，这边为您查询。',
+  provider: PROVIDER, model: MODEL,
+  evals: {
+    deny: [{ before: [], say: '您本月的费用是30元，账期是2026年8月。' }],
+    allow: [
+      { before: ['lookup_account'], say: '已为您核实，账期是2026年8月，金额30元。' },
+      { before: [], say: '麻烦您先提供一下学号、手机号码，这边为您查询。' },
+    ],
+    // 留出：换一种账号详情，SOP 原文没举过这一种
+    heldout: [{ before: [], say: '您这个号是2024年9月开的户，一直是正常状态。' }],
   },
 }
 
@@ -149,19 +175,13 @@ const NO_PROMISE: ConstraintSpec = {
 }
 
 /** SPEC.md 整份的声明形式。 */
-export const DECLARATIONS: ConstraintSpec[] = [A1, A2, B, C, D, NO_PROMISE]
+export const DECLARATIONS: ConstraintSpec[] = [A1, A2, B, B2, C, D, NO_PROMISE]
 
 /**
  * SPEC.md 里**填不进声明**的条款。这一份是本轮命题的另一半答案，
  * 不列出来就等于假装填满了。
  */
 export const UNCOVERED: UncoveredClause[] = [
-  {
-    clause: 'B：「未认人不得 reply 账号相关内容」的说话那一侧',
-    why: '内置类型只能按工具名判前置，判不了「这段话是不是在讲账号详情」。'
-      + '要表达它，需要一个把 B 的事实来源（会话日志）和 D 的上下文判定合起来的新类型：'
-      + '说到某类内容之前必须有某个事实。声明只做到了取数据那一侧。',
-  },
   {
     clause: '会话现实三条：槽位要多轮追问补齐、信息不全时不得直接查、闲聊输入不得误调工具',
     why: '这三条是对 agent 能力的要求，不是对它的约束——没有「违反」的那一刻可以拦。'

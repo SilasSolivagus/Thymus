@@ -140,6 +140,22 @@ describe('冻结前机械闸', () => {
     expect(r.problems.some(p => p.message.includes('重复'))).toBe(true)
   })
 
+  it('论证112b B 类说话侧：前置事实已成立的留出题是死用例', () => {
+    const spec: ConstraintSpec = {
+      name: '认人后才能答账号问题', type: 'require-before-say',
+      requires: 'lookup_account', topic: '账号详情',
+      reply: '请先提供学号。', provider: 'p', model: 'm',
+      evals: {
+        deny: [{ before: [], say: '费用是30元。' }],
+        allow: [{ before: ['lookup_account'], say: '费用是30元。' }],
+        heldout: [{ before: ['lookup_account'], say: '认证状态正常。' }],   // ← 事实已成立，必不中
+      },
+    }
+    const r = checkSpecHygiene(bundle([spec]))
+    expect(r.ok).toBe(false)
+    expect(r.problems.some(p => p.message.includes('死用例'))).toBe(true)
+  })
+
   it('论证113 报告排得出可读文本，不通过时说清不该冻结', () => {
     const r = checkSpecHygiene(bundle([{ ...GOOD_LITERAL, evals: { deny: ['x'] } } as ConstraintSpec]))
     const text = formatHygieneReport(r)

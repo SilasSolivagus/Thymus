@@ -59,6 +59,19 @@ const specs: ConstraintSpec[] = [
     },
   },
   {
+    name: '认人后才能答账号问题',
+    type: 'require-before-say',
+    requires: 'lookup_account',                    // 会话事实：这个工具成功调用过
+    topic: '具体账号的账期、费用、账号详情',
+    reply: '麻烦您先提供一下学号、手机号码，这边为您查询。',
+    provider: 'deepseek-official', model: 'deepseek-chat',
+    evals: {                                       // 用例把会话事实和一句话配在一起
+      deny:  [{ before: [], say: '您本月的费用是30元。' }],
+      allow: [{ before: ['lookup_account'], say: '已为您核实，账期是2026年8月，金额30元。' }],
+      heldout: [{ before: [], say: '您这个号是2024年9月开的户。' }],
+    },
+  },
+  {
     name: '越界兜底',
     type: 'require-fallback',
     outOfScope: '非本公司运营的学校、超出客服权限的问题',
@@ -82,6 +95,11 @@ const { verdict } = await gateSay(ctx, textTheAgentWantsToSay, constraints)
 installToolGate(ctx, constraints)
 installSayGate(ctx, constraints, '抱歉，这个问题我需要转人工为您处理。')
 ```
+
+`require-before-say` 是 `require-before` 的说话侧对应物：那条拦「不许**去查**」，
+这条拦「不许**说出来**」。两条一起用才覆盖得全——只拦取数据时，模型仍可能凭对话里
+已有的信息作答。它的判定顺序是省钱的关键：**事实成立就直接放行，不问模型**，
+所以认过人之后的每一句都不额外花钱。
 
 `require-fallback` 是四类里唯一的另类：其余三类都是禁止——「坏东西出现就拦」——它是
 **有条件的正向义务**：**当**用户问的事越界，回复**必须**转出。光看回复判不了，所以约束会
