@@ -14,7 +14,8 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { gateSay, installToolGate, type Constraint } from './thymus-src/gate.ts'
 import {
-  checkReplacements, checkSpecEvals, compileConstraints, formatSpecEvalReports,
+  checkReplacements, checkSpecEvals, compileConstraints, formatReplacementReports,
+  formatSpecEvalReports,
   type ConstraintSpec,
 } from './thymus-src/spec.ts'
 
@@ -666,6 +667,39 @@ describe('替代话术交叉验收 · checkReplacements', () => {
     expect(r!.hits.some(h => h.constraint === FALLBACK.name)).toBe(true)
     expect(r!.hits.every(h => !h.reason.includes('拿不到会话上下文'))).toBe(true)
     expect(judge.inputs.some(i => i.includes('我在XX学校，你们能修吗'))).toBe(true)
+  })
+
+  it('论证138 终点串与非终点分开标：严重级别不一样', async () => {
+    // 发现 31 之后只有网关兜底串是终点：非终点的替代话术撞上别的约束，运行时会把它
+    // 换掉；终点串撞上就没人接得住了。所以报告要能分开，让调用方判不同的级别。
+    const ctx = await boot(new MixedJudge(() => false))
+    const reports = await checkReplacements(ctx, [LITERAL_PORTAL], [
+      { from: '某条约束的替代话术', text: '请登录 portal 自助处理。' },
+      { from: '网关兜底串', text: '请登录 portal 自助处理。', terminal: true },
+    ])
+    const nonTerminal = reports.find(r => r.from === '某条约束的替代话术')!
+    const terminal = reports.find(r => r.from === '网关兜底串')!
+    expect(nonTerminal.ok).toBe(false)
+    expect(nonTerminal.terminal).toBe(false)
+    expect(terminal.ok).toBe(false)
+    expect(terminal.terminal).toBe(true)
+  })
+
+  it('论证139 声明自带的 reply 都不是终点——运行时够得着它们', async () => {
+    const ctx = await boot(new MixedJudge(() => false))
+    const reports = await checkReplacements(ctx, [LITERAL_PORTAL, BEFORE_SAY])
+    expect(reports.every(r => !r.terminal)).toBe(true)
+  })
+
+  it('论证140 报告文本把两级分开说，终点那级才说不应冻结', async () => {
+    const ctx = await boot(new MixedJudge(() => false))
+    const dirty = { ...BEFORE_SAY, reply: '请登录 portal 后先提供学号。' } as ConstraintSpec
+    const both = await checkReplacements(ctx, [LITERAL_PORTAL, dirty], [
+      { from: '网关兜底串', text: '这句是干净的。', terminal: true },
+    ])
+    const text = formatReplacementReports(both)
+    expect(text).toContain('退到终点串')          // 非终点那条：说清后果
+    expect(text).not.toContain('不应冻结')        // 终点串干净，就不该说这句
   })
 
   it('论证137 判定有方差：判一次会漏，repeats 把它捞回来', async () => {

@@ -591,8 +591,19 @@ export interface ReplacementReport {
   from: string
   text: string
   hits: ReplacementHit[]
-  /** 没撞上任何约束才为真。为假就不该冻结。 */
+  /** 没撞上任何约束才为真。 */
   ok: boolean
+  /**
+   * 是不是**终点串**——退无可退、吐出去就是用户看到的最后一句。
+   *
+   * 这一位决定严重级别，而级别的依据是运行时的真实后果（发现 31）：网关会让替代话术
+   * 再过一遍闸，非终点的那些撞了就被换成终点串，所以后果是「话术从贴合场景降级成通用
+   * 兜底」——质量损失，不是合规事故。终点串撞了才是没人接得住，那一条必须拦住冻结。
+   *
+   * 注意别把它读成「非终点的可以不管」：运行时那次再裁决**只判一次**，语义判定有方差
+   * （发现 29 六：单次命中率低的到 0.55），实测仍有约 1/20 漏网。
+   */
+  terminal: boolean
 }
 
 /**
@@ -641,7 +652,9 @@ function triggerContexts(spec: ConstraintSpec): { context: SayContext; trigger: 
  * @param ctx - 宿主 context。
  * @param specs - 约束声明。
  * @param extra - 声明之外的替代话术，比如 `installSayGate` 那个网关兜底串——
- *   它不在任何一条声明里，不送进来就查不到。
+ *   它不在任何一条声明里，不送进来就查不到。网关兜底串要带 `terminal: true`：
+ *   它是退无可退的那一句，级别与其余的不同（见 {@link ReplacementReport.terminal}）。
+ *   声明自带的 `reply` 一律不是终点——运行时够得着它们。
  * @param options - `repeats` 是每个语境判几次，缺省 1。**语义判定有方差**，判一次会漏。
  *   实测（两轮各 20 次，共 40 次；对照两侧干净：明确违规 40/40、干净话术 0/40）：
  *   网关兜底串对 D 单次命中 35/40，B2 的替代话术对 D 只有 **22/40**，对 B2 自己 29/40。
@@ -653,17 +666,17 @@ function triggerContexts(spec: ConstraintSpec): { context: SayContext; trigger: 
 export async function checkReplacements(
   ctx: Context,
   specs: readonly ConstraintSpec[],
-  extra: readonly { from: string; text: string }[] = [],
+  extra: readonly { from: string; text: string; terminal?: boolean }[] = [],
   options: { repeats?: number } = {},
 ): Promise<ReplacementReport[]> {
   const repeats = Math.max(1, options.repeats ?? 1)
   const compiled = compileConstraints(ctx, specs)
-  const targets: { from: string; text: string }[] = [
+  const targets: { from: string; text: string; terminal: boolean }[] = [
     ...specs.flatMap(s => {
       const reply = (s as { reply?: unknown }).reply
-      return typeof reply === 'string' ? [{ from: s.name, text: reply }] : []
+      return typeof reply === 'string' ? [{ from: s.name, text: reply, terminal: false }] : []
     }),
-    ...extra,
+    ...extra.map(e => ({ ...e, terminal: e.terminal ?? false })),
   ]
   const reports: ReplacementReport[] = []
   for (const t of targets) {
@@ -688,17 +701,27 @@ export async function checkReplacements(
   return reports
 }
 
-/** 把替代话术的交叉验收排成一段可读文本。 */
+/**
+ * 把替代话术的交叉验收排成一段可读文本。两级分开说——级别的依据见
+ * {@link ReplacementReport.terminal}。
+ */
 export function formatReplacementReports(reports: readonly ReplacementReport[]): string {
-  const bad = reports.filter(r => !r.ok)
+  const blocking = reports.filter(r => !r.ok && r.terminal)
+  const degraded = reports.filter(r => !r.ok && !r.terminal)
+  const mark = (r: ReplacementReport): string => r.ok ? '✓' : r.terminal ? '✗' : '·'
   const lines = reports.map(r => [
-    `${r.ok ? '✓' : '✗'} [${r.from}]「${r.text}」`,
+    `${mark(r)} [${r.from}]${r.terminal ? '（终点串）' : ''}「${r.text}」`,
     ...r.hits.map(h => `    撞上 ${h.constraint}（${h.trigger}）：${h.reason}`),
+    ...r.ok || r.terminal ? [] : ['    → 运行时会退到终点串（只判一次，有方差漏网）'],
   ].join('\n'))
-  const head = bad.length === 0
-    ? `✓ ${reports.length} 条替代话术都没撞上别的规矩`
-    : `✗ ${bad.length}/${reports.length} 条替代话术自己违规，不应冻结`
-  return [head, ...lines].join('\n')
+  const head: string[] = []
+  if (blocking.length > 0) head.push(`✗ ${blocking.length} 条终点串自己违规，不应冻结`)
+  if (degraded.length > 0) {
+    head.push(`· ${degraded.length}/${reports.length} 条替代话术撞上别的规矩，`
+      + '运行时会退到终点串——话术降级，不拦冻结')
+  }
+  if (head.length === 0) head.push(`✓ ${reports.length} 条替代话术都没撞上别的规矩`)
+  return [...head, ...lines].join('\n')
 }
 
 /** 把验收报告排成一段可读文本，给交付时贴进记录用。 */

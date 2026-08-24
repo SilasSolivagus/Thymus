@@ -79,22 +79,23 @@ async function main(): Promise<void> {
   // 网关兜底串不在任何一条声明里，得单独送进来——实测它是撞得最狠的一条。
   console.log(`\n${'='.repeat(76)}\n替代话术交叉验收\n${'='.repeat(76)}`)
   const replacements = await checkReplacements(await boot(), DECLARATIONS, [
-    { from: '网关兜底串', text: '抱歉，这个问题超出我这边能处理的范围，我帮您转相关部门跟进。' },
+    { from: '网关兜底串', text: '抱歉，这个问题超出我这边能处理的范围，我帮您转相关部门跟进。', terminal: true },
   ], { repeats: REPLACEMENT_REPEATS })
   console.log(formatReplacementReports(replacements))
-  const badReplacements = replacements.filter(r => !r.ok)
+  // 只有终点串违规才拦冻结：非终点的那些运行时会被换掉（发现 31），后果是话术降级，
+  // 不是合规事故。这个分级是发现 31 之后才成立的——在替代话术不过闸的年代每条都是终点。
+  const badReplacements = replacements.filter(r => !r.ok && r.terminal)
 
   console.log(`\n${'='.repeat(76)}\n填不进声明的条款（${UNCOVERED.length} 条）\n${'='.repeat(76)}`)
   for (const u of UNCOVERED) console.log(`\n· ${u.clause}\n  ${u.why}`)
 
   // 拦在最后而不是当场抛：上面那几节都是这次交付的记录，先打全再判。
   //
-  // 为什么是 error 不是警告：这不是「理论上可能」。真 agent 上越界的 10 轮里有 4 轮，
-  // 网关吐出去的那句让 D 的兜底义务落空（发现 29 七）。而且**靠声明顺序护不住**——
-  // 顺序只决定两条都拦时谁的话术赢；没拦原句的那条根本不参与裁决，替代话术从它面前
-  // 直接过去（论证96）。所以只要有一条替代话术在别的约束下站不住，就不该冻结。
+  // 为什么终点串是 error：它退无可退，没人接得住。非终点的降为提示，因为运行时会把
+  // 它换成终点串（发现 31，端到端 4/20 → 1/20）——但那次再裁决只判一次、有方差漏网，
+  // 所以提示行里写明了后果，不能读成「不用管」。
   if (badReplacements.length > 0) {
-    throw new Error(`${badReplacements.length} 条替代话术自己违规，不应冻结：`
+    throw new Error(`${badReplacements.length} 条终点串自己违规，不应冻结：`
       + badReplacements.map(r => `[${r.from}] 撞上 ${r.hits.map(h => h.constraint).join('、')}`).join('；'))
   }
 }
