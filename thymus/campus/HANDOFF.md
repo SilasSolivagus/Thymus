@@ -14,6 +14,31 @@
 约束 spec 见 `SPEC.md`（四类：A禁语 / B认人前置 / C内部字段不外泄 / D越界兜底），
 保留原文话术与模糊表述，不为评测优化。
 
+## 现在能做到什么（大白话，接手先看这段）
+
+一份客服 SOP，能变成一张表挂到 agent 上。交付走四步：
+
+1. **照工作单填表**（`packages/thymus/TEMPLATE.zh.md`）——五种规矩类型各填什么、
+   考题怎么写、表达不了的怎么登记，都有模板和真实反例。
+2. **跑机械闸**（`checkSpecHygiene`，不花钱）——查考题缺没缺、留出题是不是伪装的、
+   一条规矩里是不是混了两条、`uncovered` 空不空。不过就不该冻结。
+3. **跑考题**（`checkSpecEvals`）——必拦 / 必放 / 留出三组数字，哪组掉了对应哪种毛病。
+4. **上线之后每天回流**（`badcase.ts`）——线上样本人标、确定性分流、留出侧只给数字、
+   与上一版比。
+
+运行时那侧：工具通道挂调度器（拒绝 + 产出抹除），说话通道挂 `prepareCall`
+（缓冲全流、装配后裁决、只换话不停轮），另有 `propose_tool` 让 agent 自己长工具
+而装工具的动作留在宿主手里（配额 / 去重 / 回收）。
+
+**人不可替代的四件事**，这轮反复证明省不掉：写留出题、拆条款、判定「这条表达不了」、
+调措辞。前三件有模板和脚本兜着；第四件只能改完重跑看数字——**措辞是唯一没有机械检查
+的一环**。
+
+**最该记住的一句**：evals 是检测器，检测不到没写进去的东西。漏掉的条款不会有用例，
+报告因此全绿——所以 `uncovered` 必须是必填项。
+
+一张图：`../../output/story-map.svg`（交付故事地图，横向六个环节、纵向四层）。
+
 ## 已确认的发现
 
 | # | 结论 | 文件 |
@@ -37,6 +62,15 @@
 | 17 | 说话侧挂载点是 `ctx.llm.prepareCall`（`ctx.llm.stream` 命中 0 次）；它站在 `llm/stream` 链外，但沙箱插件够得到同一个入口，后包的赢；reasoning 是漏点，重试每次都重新过网关 | `FINDINGS-17-say-mount-point.md` |
 | 18 | B 类的状态从会话事件现读即可，不用自己存；工具侧有身份、说话侧身份在 `stream` 那一层；多 agent 不串；并发派发时事实还没落库 | `FINDINGS-18-b-class-state.md` |
 | 19 | 压缩与剪枝只动 surface，事件日志只增不减；resume 之后 B 类的事实仍在 | `FINDINGS-19-facts-survive-compaction.md` |
+| 20 | D 类真模型验收：判得住一半，漏的那半是条款混写造成的（拆开后留出 5/5） | `FINDINGS-20-d-class-real-model.md` |
+| 21 | SPEC.md 整份编译成声明：四类里三类填得满，B 填一半；**措辞是未受控变量** | `FINDINGS-21-spec-as-declaration.md` |
+| 22 | 模型自己写声明 vs 人写：选型全对，但缺口硬套、留出集 2/3 是伪装的、自评全绿 | `FINDINGS-22-authored-vs-human-spec.md` |
+| 23 | 工具注册边界：旧名字动不了、新名字随便造、**占名攻击成立** | `FINDINGS-23-propose-tool.md` |
+| 24 | `propose_tool` 真 agent 端到端：白名单扛住绕过，但工具表会膨胀 | `FINDINGS-24-propose-agent-e2e.md` |
+| 25 | 配额、去重、回收：撞上提交上限不会把模型逼去编造 | `FINDINGS-25-propose-quota.md` |
+| 26 | 说话侧首字延迟＝整段生成时间；并发不串；B 缺口用 `require-before-say` 补上 | `FINDINGS-26-say-cost-and-b2.md` |
+| 27 | `require-before-say` 真模型验收：判得住，但**替代话术会被自己的规矩拦下** | `FINDINGS-27-b2-real-model.md` |
+| 28 | 注册数上限真链路验到；去重仍无证据；回流补上工具侧五种样本形状 | `FINDINGS-28-quota-and-toolside-reflow.md` |
 
 **分层结论：写规矩，模型能；判自己写得对不对，现在不能；语义那部分，机制上够到边了，
 模型也会走，但它第一版有相当比例会把旧机制留在前门、收益自己抵消
