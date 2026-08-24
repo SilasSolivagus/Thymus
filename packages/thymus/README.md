@@ -125,6 +125,21 @@ and never touches it.
 
 Held-out results **do not count toward pass/fail** — a literal phrase list missing them is the type's capability boundary, not a mistake in the declaration. But the number is right there, and it is the evidence for whether you need semantic judging.
 
+## Freezing a spec
+
+Before a declaration is frozen, run `checkSpecHygiene(bundle)` — static, no model calls,
+and it refuses the freeze on anything it can prove wrong: a missing case group, a held-out
+case that is really a must-block one in disguise (each type has its own check), a clause
+whose text mixes a conditional obligation with an unconditional prohibition, an `uncovered`
+entry with no reason. A declaration ships as a `SpecBundle`: the specs plus the clauses that
+could NOT be expressed, each with why. Leaving `uncovered` empty warns — a real SOP rarely
+has nothing outside the built-in types, and a model authoring the declaration never says
+"I cannot express this" on its own.
+
+`TEMPLATE.zh.md` is the filling-in worksheet: it covers only the parts a human cannot hand
+off — writing held-out cases, splitting mixed clauses, deciding what is inexpressible, and
+tuning wording — and says at each step what the machine checks for you.
+
 ## Design rules
 
 These were not designed up front. Each one came out of a run where we thought something was blocked and it was not.

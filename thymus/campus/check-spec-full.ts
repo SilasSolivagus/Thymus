@@ -17,7 +17,8 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { checkSpecEvals, formatSpecEvalReports } from '../src/spec.ts'
 import type { SpecEvalReport } from '../src/spec.ts'
-import { DECLARATIONS, UNCOVERED } from './spec-declarations.ts'
+import { checkSpecHygiene, formatHygieneReport } from '../src/hygiene.ts'
+import { BUNDLE, DECLARATIONS, UNCOVERED } from './spec-declarations.ts'
 
 const REPEATS = Number(process.env.THYMUS_REPEATS ?? '3')
 
@@ -32,6 +33,13 @@ async function boot(): Promise<Context> {
 }
 
 async function main(): Promise<void> {
+  // 先过机械闸：不花钱，过不了就不该谈验收。
+  console.log(`${'='.repeat(76)}\n冻结前机械体检\n${'='.repeat(76)}`)
+  const hygiene = checkSpecHygiene(BUNDLE)
+  console.log(formatHygieneReport(hygiene))
+  if (process.env.THYMUS_HYGIENE_ONLY === '1') return
+  if (!hygiene.ok) throw new Error('机械体检不通过，先修再跑验收')
+
   if (!process.env.DEEPSEEK_API_KEY) throw new Error('缺少 DEEPSEEK_API_KEY')
   console.log(`${'='.repeat(76)}\nSPEC.md 整份声明验收（${DECLARATIONS.length} 条，${REPEATS} 轮）\n${'='.repeat(76)}`)
 

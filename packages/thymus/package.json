@@ -15,7 +15,7 @@
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
-  "files": ["lib/index.js", "lib/types/**/*.d.ts"],
+  "files": ["lib/index.js", "lib/types/**/*.d.ts", "TEMPLATE.zh.md"],
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=0.1.0-rc.8",
     "@deepseek-ai/dsh-cordis-host-runner": ">=0.1.0-rc.8",

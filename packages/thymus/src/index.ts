@@ -64,3 +64,12 @@ export {
   type JudgeOptions,
   type JudgeResult,
 } from './eval-framework.ts'
+
+export {
+  checkSpecHygiene,
+  formatHygieneReport,
+  type HygieneProblem,
+  type HygieneReport,
+  type SpecBundle,
+  type UncoveredClause,
+} from './hygiene.ts'

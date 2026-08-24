@@ -3,7 +3,7 @@
 24 份 FINDINGS 里有若干条已被后来的实验推翻或降级。**只读某一份会踩到作废的结论**，
 所以先读这份，再按需要跳转。
 
-最后更新：propose_tool 真 agent 端到端之后。测试 `./thymus/run-tests.sh` 应为 11 files / 151 passed。
+最后更新：交付工具链第一版之后。测试 `./thymus/run-tests.sh` 应为 12 files / 162 passed。
 
 ---
 
@@ -25,7 +25,7 @@
 
 ## 架构结论（可直接照做的设计规则）
 
-这十七条都有实测支撑，编号指向证据。
+这十八条都有实测支撑，编号指向证据。
 
 1. **约束不进动态注册表**，由宿主直接挂载。否则任何动态插件都能 `stop` 掉它（08），
    连换版失败都会把它带走（14）。
@@ -89,6 +89,12 @@
 17. **先装约束、先把全部受管工具注册完，再放行任何动态插件。** 前半句是老规矩，
     后半句是发现 23 补的：工具名先到先得，动态插件抢先注册 `query_bill` 之后宿主
     注册真版会被拒，冒牌版生效。白名单管的是「谁能调」，不管「谁先占了这个名」。
+
+18. **冻结前先过机械闸**（`checkSpecHygiene`，纯静态不花钱）。人不可替代的四件事里，
+    前三件都有一部分能机械检出：留出用例伪装（逐类型各有检法）、条款混写
+    （同一段文本里既有「必须」又有「不得」）、覆盖缺口没登记。**措辞是唯一没有机械
+    检查的一环**，只能靠跑留出集发现。交付的那一份是 `SpecBundle`——约束加上明确
+    登记的 `uncovered`。
 
 代码：`packages/thymus/src/gate.ts`（520 行），`packages/thymus/src/eval-framework.ts`（328 行），
 `packages/thymus/src/spec.ts`（505 行）。
@@ -154,6 +160,14 @@
   「非运营学校」一条没漏过（20）。
 - 把条款里的无条件禁止拆成独立一条之后，留出 5/5×3 轮——**漏的那半是声明写法造成的，
   不是判定器能力不够**（20）。
+
+### 交付工具链
+
+- `checkSpecHygiene` 上线第一次跑就抓到我们自己那份声明的洞：C 类没写留出用例
+  （发现 21 里我明说「留白，不假装有」）。补法用的是发现 22 里模型提出的思路——
+  换一个声明里没列的内部字段。**机械闸的第一份价值来自它抓住了写它的人。**
+- 填表工作单 `packages/thymus/TEMPLATE.zh.md`：只覆盖人不可替代的四件事，
+  每步写明机器会替你查什么。
 
 ### `propose_tool`（写工具与装工具拆开）
 
@@ -302,7 +316,7 @@
 
 ## 运行方式
 
-- 测试：`./thymus/run-tests.sh`（11 files / 151 passed）
+- 测试：`./thymus/run-tests.sh`（12 files / 162 passed）
 - 探针与实验：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
 - 花钱的脚本：`a2-ab` / `a2-feedback` / `a2-jspace` / `check-llm-optin` / `check-intact-damage` /
   `check-d-fallback`（`THYMUS_ARM=full|narrow|split|split-narrow|wording` 选臂）/
