@@ -73,3 +73,11 @@ export {
   type SpecBundle,
   type UncoveredClause,
 } from './hygiene.ts'
+
+export {
+  installProposeTool,
+  type ProposalKind,
+  type ProposalPolicy,
+  type ProposeToolHandle,
+  type ToolProposal,
+} from './propose.ts'

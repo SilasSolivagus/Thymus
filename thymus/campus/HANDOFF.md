@@ -131,7 +131,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   断言看的是**模型在下一轮请求里实际收到的 tool-result**，不是我们自己的返回值
   （论证59–63，不花钱）。四条对照：老写法在真 agent 上 execute 命中 0 次、
   无网关时内部字段确实漏、缺 `error` 时拒绝理由被换成序列化错误发给模型、
-  抹除只动该动的字段。测试 12 files / 162 passed。
+  抹除只动该动的字段。测试 13 files / 173 passed。
 
 - **说话侧挂载点——已探，见发现 17**（`probe-say-mount.ts`，脚本化 adapter，不花钱）。
   `ctx.llm.stream` 命中 0 次，是第二个 `execute`；agent 走 `preparedCall.stream()`。
@@ -149,7 +149,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   验收八条走真 agent 路径（论证69–77，脚本化 adapter，不花钱）：挂 `ctx.llm.stream`
   命中 0 次的对照、无网关时禁语落库的阳性对照、`assistant/chunk` 里也没有禁语
   （证明没先放行再改）、reasoning 分开判且不与正文拼接、只判正文会漏的对照、
-  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 12 files / 162 passed。
+  拒绝后工具照跑且这一轮走完、纯工具调用那一轮零判定。测试 13 files / 173 passed。
 
 - **B 类的状态——已探，见发现 18**（`probe-b-state.ts`）。三条结论：
   状态**不用自己存**，从 `agent.session.events` 现读就够（`tool/call` 的名字与
@@ -240,7 +240,10 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
   `TEMPLATE.zh.md`（填表工作单）。论证103–113。
   机械闸第一次跑就抓到我们自己那份声明缺 C 类的留出用例——补法用的是发现 22 里模型
   提出的思路。剩下的：措辞那一环仍然没有机械检查（架构结论 16），只能靠跑留出集发现。
-- **下一步**：`propose_tool` 的配额、去重、回收（发现 24 暴露的，不加会撑爆名字空间）。
+- **`propose_tool` 的配额、去重、回收——已做，见发现 25**（`packages/thymus/src/propose.ts`，
+  论证114–124）。真 agent 上验到回收生效（3/3 轮工具表干净回收）与**撞上提交上限之后
+  不会编造**（3/3 轮零编造，转而问用户排查信息）。去重与注册数配额没触发过，
+  只有单测支撑——要验得先造出「模型反复造工具」那个局面，那行为这几轮没复现。
 - B 那个缺口要补的话，是一个新内置类型：说到某类内容之前必须有某个事实
   （B 的事实来源 + D 的上下文判定）。先探再写。
 - A1 的留出集稳定 0/2 说明字面词表该并挂一条语义判定——并挂之后两条会不会互相干扰，没验。
@@ -313,7 +316,7 @@ Thymus 没有显式配 `retryPolicy`，直接继承新默认值。瞬时失败�
 ## 运行方式
 
 - 探针/demo：`DEMODIR=campus DEMO=<name> ./thymus/demo/run.sh`
-- 测试：`./thymus/run-tests.sh`（应为 12 files / 162 passed）
+- 测试：`./thymus/run-tests.sh`（应为 13 files / 173 passed）
 - `spec-plugins.ts` 顶层已改为「仅直接执行时运行」。**其他 campus 脚本不要 import 它**
   之外的实验脚本前先确认同样有这个判断——曾因顶层无条件 `main()` 被 import 触发重跑，
   覆盖过冻结的 `evals.json`（从 `../trajectories/_no-cwd/campus-author/session.jsonl`
