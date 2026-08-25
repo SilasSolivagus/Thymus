@@ -44,7 +44,7 @@ export const PAGE = `<!doctype html>
   .hint b { color:var(--fg); font-weight:600; cursor:pointer; text-decoration:underline dotted }
 </style></head><body>
 <header>
-  <h1>Thymus · 约束治理实况 <a href="/intake" style="font-size:12.5px;font-weight:400;margin-left:10px">前置登记 →</a></h1>
+  <h1>Thymus · 约束治理实况 <a href="/" style="font-size:12.5px;font-weight:400;margin-left:10px">← 处理台</a></h1>
   <p>内核是真的 dsh（AgentLoop + DeepSeek + 工具运行时），约束是真网关，声明用 campus 那份原件。
      这一页的壳是本仓库写的，不是 dsh 自带界面。</p>
 </header>
@@ -133,7 +133,7 @@ export const INTAKE_PAGE = `<!doctype html>
     font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif }
   header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:16px }
   header h1 { margin:0; font-size:15px; font-weight:600 }
-  header nav a { font-size:13px; color:var(--muted); text-decoration:none; margin-right:12px }
+  header nav a { font-size:13px; color:var(--muted); text-decoration:none; margin-right:11px }
   header nav a.on { color:var(--fg); font-weight:600 }
   header p { margin:0; font-size:12.5px; color:var(--muted) }
   main { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,460px); height:calc(100vh - 56px) }
@@ -166,7 +166,8 @@ export const INTAKE_PAGE = `<!doctype html>
 </style></head><body>
 <header>
   <h1>现场前置登记</h1>
-  <nav><a href="/">对话</a><a href="/intake" class="on">前置登记</a></nav>
+  <nav><a href="/">处理台</a><a href="/rules">约束声明</a>
+    <a href="/intake" class="on">前置登记</a><a href="/chat">对话</a></nav>
   <p>人在现场问出来的前提，进系统之后反过来收窄系统允许做的事</p>
 </header>
 <main>
@@ -214,6 +215,7 @@ export const INTAKE_PAGE = `<!doctype html>
 
   <aside class="panel">
     <div id="delta" class="delta">改动任一项，这里显示它启用或禁用了什么。</div>
+    <div id="queueNote" class="hint" style="margin:-8px 0 16px"></div>
     <h2>可做范围</h2>
     <div class="big" id="count">—</div>
     <div id="blocked"></div>
@@ -265,6 +267,8 @@ async function refresh() {
     el.textContent = '【' + g.level + '】' + g.message; gp.appendChild(el)
   }
   document.getElementById('stmt').textContent = d.statement
+  const q = document.getElementById('queueNote')
+  if (q) q.textContent = '这些前提当前产生 ' + d.queueSize + ' 项待处理，已排进处理台'
   const dl = document.getElementById('delta')
   if (last) {
     const gained = d.scope.allowedTypes.filter(t => !last.scope.allowedTypes.includes(t))
@@ -291,4 +295,119 @@ document.getElementById('copy').addEventListener('click', () => {
   setTimeout(() => { document.getElementById('copy').textContent = '复制' }, 1200)
 })
 refresh()
+</script></body></html>`
+
+/**
+ * 处理台——系统的首屏。
+ *
+ * 打开系统第一眼要回答的是「今天有什么要我处理」，不是一张空表。前置登记的阻断项、
+ * 被前提禁用的约束，都在这里排队；点进去才是各自的界面。
+ *
+ * `__VIEW__` 会被服务端替换成默认视图（desk / rules）。
+ */
+export const DESK_PAGE = `<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>处理台 · Thymus</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --muted:#6b6b6b;
+    --line:#e3e3e3; --card:#fafafa; --deny:#b42318; --warn:#8a6100; --ok:#2f6f3e; --accent:#0071e3;
+    --denyBg:#fdf0ef; --warnBg:#fbf4e6; --okBg:#eef7f0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#17181a; --fg:#e8e8e8; --muted:#9a9a9a;
+    --line:#2c2e31; --card:#1e2022; --deny:#f97066; --warn:#e0b341; --ok:#75c98d; --accent:#4c9dff;
+    --denyBg:#2a1c1b; --warnBg:#272016; --okBg:#1a241d; } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif }
+  header { padding:12px 22px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:18px }
+  header .inst { font-size:14px; font-weight:600 }
+  header .inst span { font-weight:400; color:var(--muted); font-size:12.5px; margin-left:7px }
+  nav { margin-left:auto; display:flex; gap:4px }
+  nav a { padding:5px 11px; border-radius:7px; font-size:13px; color:var(--muted); text-decoration:none }
+  nav a.on { background:var(--card); color:var(--fg); font-weight:600 }
+  .wrap { max-width:940px; margin:0 auto; padding:26px 22px 70px }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted);
+    margin:0 0 12px; font-weight:600 }
+  .sum { display:flex; gap:26px; align-items:baseline; margin-bottom:22px; flex-wrap:wrap }
+  .sum b { font-size:26px; font-weight:600; letter-spacing:-.02em }
+  .sum i { font-style:normal; font-size:13px; color:var(--muted); margin-left:6px }
+  .card { border:1px solid var(--line); border-radius:11px; padding:13px 15px; margin-bottom:9px;
+    display:flex; gap:13px; align-items:flex-start; text-decoration:none; color:inherit }
+  .card:hover { border-color:var(--accent) }
+  .tag { flex:none; font-size:11.5px; padding:2px 8px; border-radius:999px; margin-top:2px }
+  .tag.block { background:var(--denyBg); color:var(--deny) }
+  .tag.warn { background:var(--warnBg); color:var(--warn) }
+  .card .t { font-size:14px; line-height:1.5 }
+  .card .d { font-size:12.5px; color:var(--muted); margin-top:3px; line-height:1.5 }
+  .card .k { font-size:11.5px; color:var(--muted); margin-top:4px }
+  .empty { color:var(--muted); font-size:14px; padding:14px 0 }
+  table { width:100%; border-collapse:collapse; font-size:13.5px }
+  th { text-align:left; font-size:11.5px; letter-spacing:.04em; color:var(--muted);
+    font-weight:600; padding:0 10px 8px 0 }
+  td { padding:9px 10px 9px 0; border-top:1px solid var(--line) }
+  .off { color:var(--deny) }
+  .pill { font-size:11.5px; padding:2px 8px; border-radius:999px; background:var(--card); color:var(--muted) }
+  .pill.bad { background:var(--denyBg); color:var(--deny) }
+</style></head><body>
+<header>
+  <div class="inst" id="inst">—<span>当前实例</span></div>
+  <nav>
+    <a href="/" id="n-desk">处理台</a>
+    <a href="/rules" id="n-rules">约束声明</a>
+    <a href="/intake" id="n-intake">前置登记</a>
+    <a href="/chat" id="n-chat">对话</a>
+  </nav>
+</header>
+<div class="wrap">
+  <div id="deskView">
+    <div class="sum">
+      <div><b id="qn">—</b><i>项待处理</i></div>
+      <div><b id="sc">—</b><i>种约束类型可用</i></div>
+    </div>
+    <h2>待处理 · 按是否需要人工介入排序</h2>
+    <div id="queue"></div>
+  </div>
+  <div id="rulesView" style="display:none">
+    <h2>约束声明 · 校园网客服</h2>
+    <table><thead><tr><th>约束</th><th>类型</th><th>状态</th></tr></thead>
+      <tbody id="specs"></tbody></table>
+    <p class="empty">被现场前提禁用的约束不会因为写得好而变得可用——那是范围，不是质量。</p>
+  </div>
+</div>
+<script>
+const view = '__VIEW__' === 'rules' ? 'rules' : 'desk'
+document.getElementById(view === 'rules' ? 'n-rules' : 'n-desk').classList.add('on')
+document.getElementById('deskView').style.display = view === 'desk' ? '' : 'none'
+document.getElementById('rulesView').style.display = view === 'rules' ? '' : 'none'
+fetch('/api/desk').then(r => r.json()).then(d => {
+  document.getElementById('inst').innerHTML = d.instance + '<span>当前实例</span>'
+  document.getElementById('qn').textContent = d.queue.length
+  document.getElementById('sc').textContent = d.scope.allowedTypes.length + '/6'
+  const q = document.getElementById('queue')
+  if (d.queue.length === 0) { q.innerHTML = '<div class="empty">没有待处理事项。</div>' }
+  const order = { '阻断': 0, '提示': 1 }
+  for (const it of d.queue.sort((a, b) => order[a.level] - order[b.level])) {
+    const a = document.createElement('a'); a.className = 'card'; a.href = it.href
+    a.innerHTML = '<span class="tag"></span><span><span class="t"></span>' +
+      '<div class="d"></div><div class="k"></div></span>'
+    const tag = a.querySelector('.tag')
+    tag.textContent = it.level; tag.classList.add(it.level === '阻断' ? 'block' : 'warn')
+    a.querySelector('.t').textContent = it.title
+    a.querySelector('.d').textContent = it.detail
+    a.querySelector('.k').textContent = '来源：' + it.kind
+    q.appendChild(a)
+  }
+  const tb = document.getElementById('specs')
+  for (const s of d.specs) {
+    const tr = document.createElement('tr')
+    tr.innerHTML = '<td></td><td></td><td></td>'
+    const [c1, c2, c3] = tr.children
+    c1.textContent = s.name; if (s.blocked) c1.className = 'off'
+    c2.textContent = s.label
+    c3.innerHTML = s.blocked
+      ? '<span class="pill bad">前提不允许</span>'
+      : '<span class="pill">可用</span>'
+    tb.appendChild(tr)
+  }
+})
 </script></body></html>`

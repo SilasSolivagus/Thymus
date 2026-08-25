@@ -13,7 +13,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { lastTurnOutcome } from '../src/turn.ts'
 import { formatCapabilityStatement, scopeFromIntake, type Intake } from '../src/intake.ts'
 import type { ThymusEvent, ThymusTrace } from './plugin.ts'
-import { INTAKE_PAGE, PAGE } from './page.ts'
+import { DECLARATIONS } from '../campus/spec-declarations.ts'
+import { DESK_PAGE, INTAKE_PAGE, PAGE } from './page.ts'
 
 /** 类型的中文说法，和能力边界说明里保持一致。 */
 const TYPE_LABEL: Record<string, string> = {
@@ -64,6 +65,46 @@ function toolTrail(events: readonly SessionEvent[], from: number): string[] {
   return out
 }
 
+/**
+ * 当前实例的前置登记。进程内内存，未落盘——M3 做实例化时才有存储。
+ * 默认值就是校园网客服那份如实填写的登记：干系人空缺、材料缺版本，这两个缺口是真的。
+ */
+let intake: Intake = {
+  instance: '校园网客服',
+  dataEgress: '允许',
+  allowedModels: ['deepseek-chat'],
+  systems: [],
+  stakeholders: [{ role: '决策人', name: '客服部主管' }],
+  materials: [{ title: '西安新路《客户服务部作业指导书》' }],
+}
+
+/** 处理台队列：现在能真实产生的两类待定项。 */
+function deskQueue(): unknown[] {
+  const scope = scopeFromIntake(intake)
+  const items: unknown[] = []
+  for (const g of scope.gaps) {
+    items.push({
+      kind: '前置登记',
+      level: g.level,
+      title: g.message,
+      detail: g.level === '阻断' ? '补齐之前，这份声明不能冻结' : '不拦冻结，但会影响事后追溯',
+      href: '/intake',
+    })
+  }
+  for (const spec of DECLARATIONS) {
+    if (scope.blockedTypes.includes(spec.type)) {
+      items.push({
+        kind: '约束不可用',
+        level: '阻断',
+        title: `${spec.name}：现场前提不允许这类约束`,
+        detail: `${TYPE_LABEL[spec.type] ?? spec.type}——数据不可出境时它整类不可用，不是效果差一点`,
+        href: '/rules',
+      })
+    }
+  }
+  return items
+}
+
 export function apply(ctx: Context, config: Config = {}): void {
   const port = config.port ?? 3083
   const provider = config.provider ?? 'deepseek-official'
@@ -102,7 +143,37 @@ export function apply(ctx: Context, config: Config = {}): void {
   const server: Server = createServer((req, res) => {
     if (req.method === 'GET' && (req.url === '/' || req.url?.startsWith('/?'))) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(DESK_PAGE)
+      return
+    }
+    if (req.method === 'GET' && req.url === '/chat') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
       res.end(PAGE)
+      return
+    }
+    if (req.method === 'GET' && (req.url === '/api/desk' || req.url === '/rules')) {
+      const scope = scopeFromIntake(intake)
+      if (req.url === '/rules') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(DESK_PAGE.replace('__VIEW__', 'rules'))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({
+        instance: intake.instance,
+        queue: deskQueue(),
+        scope,
+        specs: DECLARATIONS.map(sp => ({
+          name: sp.name, type: sp.type,
+          label: TYPE_LABEL[sp.type] ?? sp.type,
+          blocked: scope.blockedTypes.includes(sp.type),
+        })),
+      }))
+      return
+    }
+    if (req.method === 'GET' && req.url === '/api/intake') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify(intake))
       return
     }
     if (req.method === 'GET' && req.url === '/intake') {
@@ -115,13 +186,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       req.on('data', chunk => { body += chunk })
       req.on('end', () => {
         try {
-          const intake = JSON.parse(body) as Intake
+          intake = JSON.parse(body) as Intake
           const scope = scopeFromIntake(intake)
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({
             scope,
             blockedLabels: scope.blockedTypes.map(t => TYPE_LABEL[t] ?? t),
             statement: formatCapabilityStatement(intake, scope),
+            queueSize: deskQueue().length,
           }))
         } catch (e) {
           res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
