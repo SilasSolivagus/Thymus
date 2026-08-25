@@ -21,6 +21,7 @@
  * @module thymus/hygiene
  */
 import type { ConstraintSpec, DialogueCase, FactSayCase, SequenceCase } from './spec.ts'
+import type { Scope } from './intake.ts'
 
 /** 一条填不进内置类型的条款。登记它，而不是假装填满了。 */
 export interface UncoveredClause {
@@ -178,11 +179,29 @@ function fakeHeldout(spec: ConstraintSpec): string[] {
  * 冻结前的机械体检。全部静态，不调模型。
  *
  * @param bundle - 待冻结的声明与它登记的覆盖缺口。
+ * @param scope - 可选，现场前置登记算出的可做范围（见 `thymus/intake`）。给了它就先查前提：
+ *   前提的阻断项与「用了前提不允许的类型」都会拦住冻结。不给则行为与从前一致。
  * @returns 体检报告；`ok` 为假时不应冻结。
  */
-export function checkSpecHygiene(bundle: SpecBundle): HygieneReport {
+export function checkSpecHygiene(bundle: SpecBundle, scope?: Scope): HygieneReport {
   const problems: HygieneProblem[] = []
   const seen = new Set<string>()
+
+  // 现场前提先于一切：用了前提不允许的类型，后面的检查都没有意义。
+  if (scope !== undefined) {
+    for (const g of scope.gaps) {
+      problems.push({ level: g.level === '阻断' ? 'error' : 'warn', message: `现场前提：${g.message}` })
+    }
+    for (const spec of bundle.specs) {
+      if (scope.blockedTypes.includes(spec.type)) {
+        problems.push({
+          level: 'error', spec: spec.name,
+          message: `现场前提不允许这类约束（${spec.type}）——数据不可出境时它整类不可用，`
+            + '不是效果差一点，是没有',
+        })
+      }
+    }
+  }
 
   for (const spec of bundle.specs) {
     // 归因全靠名字，重名会让报告说不清是谁的问题。

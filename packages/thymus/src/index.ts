@@ -73,6 +73,20 @@ export {
 } from './eval-framework.ts'
 
 export {
+  formatCapabilityStatement,
+  scopeFromIntake,
+  type AccessLevel,
+  type DataEgress,
+  type Intake,
+  type IntakeSystem,
+  type Material,
+  type Scope,
+  type ScopeGap,
+  type Stakeholder,
+  type StakeholderRole,
+} from './intake.ts'
+
+export {
   checkSpecHygiene,
   formatHygieneReport,
   type HygieneProblem,

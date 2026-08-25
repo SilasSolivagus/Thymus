@@ -18,7 +18,7 @@
 
 一份客服 SOP，能变成一张表挂到 agent 上。交付走四步：
 
-1. **照工作单填表**（`packages/thymus/TEMPLATE.zh.md`）——五种规矩类型各填什么、
+1. **照工作单填表**（`packages/thymus/TEMPLATE.zh.md`）——六种规矩类型各填什么、
    考题怎么写、表达不了的怎么登记，都有模板和真实反例。
 2. **跑机械闸**（`checkSpecHygiene`，不花钱）——查考题缺没缺、留出题是不是伪装的、
    一条规矩里是不是混了两条、`uncovered` 空不空。不过就不该冻结。
