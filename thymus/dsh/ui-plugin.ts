@@ -11,8 +11,19 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { lastTurnOutcome } from '../src/turn.ts'
+import { formatCapabilityStatement, scopeFromIntake, type Intake } from '../src/intake.ts'
 import type { ThymusEvent, ThymusTrace } from './plugin.ts'
-import { PAGE } from './page.ts'
+import { INTAKE_PAGE, PAGE } from './page.ts'
+
+/** 类型的中文说法，和能力边界说明里保持一致。 */
+const TYPE_LABEL: Record<string, string> = {
+  'forbidden-phrases': '字面禁语',
+  'semantic-policy': '语义策略（需模型判定）',
+  'no-leak': '内部字段抹除',
+  'require-before': '调用前置',
+  'require-fallback': '越界兜底（需模型判定）',
+  'require-before-say': '说话前置（需模型判定）',
+}
 
 export const name = 'thymus-ui'
 export const inject = ['agents', 'thymusTrace']
@@ -92,6 +103,31 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (req.method === 'GET' && (req.url === '/' || req.url?.startsWith('/?'))) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
       res.end(PAGE)
+      return
+    }
+    if (req.method === 'GET' && req.url === '/intake') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(INTAKE_PAGE)
+      return
+    }
+    if (req.method === 'POST' && req.url === '/api/intake') {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        try {
+          const intake = JSON.parse(body) as Intake
+          const scope = scopeFromIntake(intake)
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({
+            scope,
+            blockedLabels: scope.blockedTypes.map(t => TYPE_LABEL[t] ?? t),
+            statement: formatCapabilityStatement(intake, scope),
+          }))
+        } catch (e) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }))
+        }
+      })
       return
     }
     if (req.method === 'POST' && req.url === '/api/chat') {
